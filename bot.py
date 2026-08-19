@@ -34,11 +34,13 @@ session.headers.update(HEADERS)
 
 
 def supabase_headers(prefer=None):
-    # Supabase yeni "sb_secret_..." anahtarlarında Authorization: Bearer kullanmak
-    # 401 üretebilir. Eski service_role JWT anahtarlarında ise Bearer gereklidir.
+    # Supabase isteklerinde mağaza/tarayıcı User-Agent'ını göndermiyoruz.
+    # Yeni sb_secret anahtarı için yalnızca apikey yeterlidir.
     headers = {
         "apikey": SUPABASE_KEY,
         "Content-Type": "application/json",
+        "User-Agent": "bahadir-indirim-bot/1.0",
+        "Accept": "application/json",
     }
     if SUPABASE_KEY.startswith("eyJ"):
         headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
@@ -48,7 +50,7 @@ def supabase_headers(prefer=None):
 
 
 def supabase_get(query):
-    r = session.get(
+    r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{query}",
         headers=supabase_headers(),
         timeout=20,
@@ -58,7 +60,7 @@ def supabase_get(query):
 
 
 def supabase_upsert(product):
-    r = session.post(
+    r = requests.post(
         f"{SUPABASE_URL}/rest/v1/products?on_conflict=product_url",
         headers=supabase_headers("resolution=merge-duplicates,return=representation"),
         json=product,
@@ -98,7 +100,6 @@ def prices_from_text(text):
 
 def canonical_url(href):
     parsed = urlparse(href)
-    # Takip/reklam parametrelerini kaldır: aynı ürün her taramada aynı kayda yazılsın.
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
 
 
@@ -121,11 +122,9 @@ def card_product(site, a, base_url):
     parsed = urlparse(href)
     if not likely_product_url(site, parsed.path):
         return None
-
     text = a.get_text(" ", strip=True)
     if len(text) < 5:
         return None
-
     node = a
     best = text
     for _ in range(5):
@@ -135,62 +134,42 @@ def card_product(site, a, base_url):
         t = node.get_text(" ", strip=True)
         if len(t) > len(best) and len(t) < 2200:
             best = t
-
     prices = prices_from_text(best)
     if not prices:
         return None
-
     current = min(prices)
     previous = max(prices) if len(prices) > 1 else None
     if previous is not None and previous <= current:
         previous = None
-
     name = a.get("aria-label") or a.get("title") or text
     name = re.sub(r"\s+", " ", name).strip()
     name = re.sub(r"(?:Sepete Ekle|Hızlı Bakış|Kargo Bedava)$", "", name).strip()
     if len(name) < 5:
         return None
-
-    return {
-        "name": name[:300],
-        "price": current,
-        "previous_display_price": previous,
-        "url": href,
-        "site": site,
-    }
+    return {"name": name[:300], "price": current, "previous_display_price": previous, "url": href, "site": site}
 
 
 def discover(site, seed_url, browser):
-    context = browser.new_context(
-        locale="tr-TR",
-        timezone_id="Europe/Istanbul",
-        user_agent=HEADERS["User-Agent"],
-        viewport={"width": 1440, "height": 1000},
-        extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
-    )
+    context = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1000}, extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]})
     page = context.new_page()
     try:
         print(f"Tarayıcı açılıyor: {seed_url}")
         response = page.goto(seed_url, wait_until="domcontentloaded", timeout=60000)
         status = response.status if response else "?"
         print(f"Sayfa HTTP: {status} | URL: {page.url}")
-
         page.wait_for_timeout(3500)
         for _ in range(3):
             page.mouse.wheel(0, 2500)
             page.wait_for_timeout(1200)
         page.mouse.wheel(0, -8000)
         page.wait_for_timeout(1000)
-
         body_text = page.locator("body").inner_text(timeout=10000)[:4000]
         lowered = body_text.lower()
         if any(x in lowered for x in ["access denied", "erişim engellendi", "robot", "captcha", "verify you are human"]):
             print("Uyarı: sayfada erişim/bot doğrulama metni görüldü.")
-
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
         print(f"Tarayıcı HTML: {len(html)} karakter")
-
         results = []
         seen = set()
         for a in soup.find_all("a", href=True):
@@ -218,11 +197,7 @@ def get_existing(url):
 
 
 def send_telegram(text):
-    r = session.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": False},
-        timeout=20,
-    )
+    r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", data={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": False}, timeout=20)
     r.raise_for_status()
     print("Telegram gönderildi")
 
@@ -233,38 +208,17 @@ def process(product):
     rows = get_existing(url)
     existing = rows[0] if rows else None
     now = datetime.now(timezone.utc)
-
     if not existing:
         display_old = product.get("previous_display_price")
         display_discount = ((display_old - current) / display_old * 100) if display_old and display_old > current else 0
         should_post = display_discount >= MIN_DISCOUNT
         last_posted = now.isoformat() if should_post else None
         if should_post:
-            text = (
-                "🔥 CİDDİ İNDİRİM!\n\n"
-                f"🛒 {product['name']}\n\n"
-                f"💰 Önceki fiyat: {display_old:,.2f} TL\n"
-                f"🔥 Yeni fiyat: {current:,.2f} TL\n"
-                f"📉 İndirim: %{display_discount:.1f}\n"
-                f"🏪 {product['site']}\n\n"
-                f"🔗 {url}"
-            )
+            text = f"🔥 CİDDİ İNDİRİM!\n\n🛒 {product['name']}\n\n💰 Önceki fiyat: {display_old:,.2f} TL\n🔥 Yeni fiyat: {current:,.2f} TL\n📉 İndirim: %{display_discount:.1f}\n🏪 {product['site']}\n\n🔗 {url}"
             send_telegram(text)
-        supabase_upsert({
-            "product_url": url,
-            "product_name": product["name"],
-            "site": product["site"],
-            "current_price": current,
-            "previous_price": current,
-            "lowest_price": current,
-            "last_posted_price": current if should_post else None,
-            "last_posted_at": last_posted,
-            "last_seen_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-        })
+        supabase_upsert({"product_url": url, "product_name": product["name"], "site": product["site"], "current_price": current, "previous_price": current, "lowest_price": current, "last_posted_price": current if should_post else None, "last_posted_at": last_posted, "last_seen_at": now.isoformat(), "updated_at": now.isoformat()})
         print(f"İlk kayıt: {product['site']} | {current:.2f} TL | ekrandaki eski={display_old} | paylaş={should_post}")
         return
-
     previous = float(existing.get("current_price") or current)
     lowest = float(existing.get("lowest_price") or previous)
     last_posted = existing.get("last_posted_at")
@@ -274,49 +228,20 @@ def process(product):
             cooldown_ok = now - datetime.fromisoformat(last_posted.replace("Z", "+00:00")) >= timedelta(hours=REPOST_COOLDOWN_HOURS)
         except Exception:
             pass
-
     discount = ((previous - current) / previous * 100) if previous > current else 0
     should_post = discount >= MIN_DISCOUNT and cooldown_ok and current < previous
-
     if should_post:
-        text = (
-            "🔥 YENİ DÜŞÜŞ!\n\n"
-            f"🛒 {product['name']}\n\n"
-            f"💰 Önceki fiyat: {previous:,.2f} TL\n"
-            f"🔥 Yeni fiyat: {current:,.2f} TL\n"
-            f"📉 Ekstra düşüş: %{discount:.1f}\n"
-            f"🏪 {product['site']}\n\n"
-            f"🔗 {url}"
-        )
+        text = f"🔥 YENİ DÜŞÜŞ!\n\n🛒 {product['name']}\n\n💰 Önceki fiyat: {previous:,.2f} TL\n🔥 Yeni fiyat: {current:,.2f} TL\n📉 Ekstra düşüş: %{discount:.1f}\n🏪 {product['site']}\n\n🔗 {url}"
         send_telegram(text)
         last_posted = now.isoformat()
-
-    supabase_upsert({
-        "product_url": url,
-        "product_name": product["name"],
-        "site": product["site"],
-        "current_price": current,
-        "previous_price": previous,
-        "lowest_price": min(lowest, current),
-        "last_posted_price": current if should_post else existing.get("last_posted_price"),
-        "last_posted_at": last_posted,
-        "last_seen_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-    })
+    supabase_upsert({"product_url": url, "product_name": product["name"], "site": product["site"], "current_price": current, "previous_price": previous, "lowest_price": min(lowest, current), "last_posted_price": current if should_post else existing.get("last_posted_price"), "last_posted_at": last_posted, "last_seen_at": now.isoformat(), "updated_at": now.isoformat()})
     print(f"Kontrol: {product['site']} | {previous:.2f} -> {current:.2f} TL | %{discount:.1f} | paylaş={should_post}")
 
 
 def main():
     total = 0
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"])
         try:
             for site, seed in SEEDS.items():
                 print(f"\n=== {site} ===")
