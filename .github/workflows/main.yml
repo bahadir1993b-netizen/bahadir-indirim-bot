@@ -1,6 +1,7 @@
 name: Bahadir Indirim Botu
 
 on:
+  push:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
@@ -42,16 +43,11 @@ jobs:
           python - <<'PY'
           import os
           import requests
-
           url = os.environ["SUPABASE_URL"].rstrip("/")
           key = os.environ["SUPABASE_SERVICE_KEY"]
           print(f"Supabase URL: {url}")
           print(f"Anahtar tipi: {key[:10]}... | uzunluk: {len(key)}")
-          r = requests.get(
-              f"{url}/rest/v1/products?select=id&limit=1",
-              headers={"apikey": key, "Content-Type": "application/json"},
-              timeout=20,
-          )
+          r = requests.get(f"{url}/rest/v1/products?select=id&limit=1", headers={"apikey": key, "Content-Type": "application/json"}, timeout=20)
           print(f"Supabase HTTP: {r.status_code}")
           print(f"Supabase cevap: {r.text[:500]}")
           r.raise_for_status()
