@@ -107,6 +107,16 @@ def prices_from_text(text):
     return vals
 
 
+def labeled_price(text, labels):
+    for label in labels:
+        m = re.search(re.escape(label) + r"\s*(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
+        if m:
+            value = clean_price(m.group(1))
+            if value is not None and value > 0:
+                return value
+    return None
+
+
 def canonical_url(href):
     parsed = urlparse(href)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
@@ -143,16 +153,29 @@ def card_product(site, a, base_url):
         t = node.get_text(" ", strip=True)
         if len(t) > len(best) and len(t) < 2200:
             best = t
-    prices = prices_from_text(best)
-    if not prices:
-        return None
 
-    # Karttaki ilk gerçek TL tutarı güncel satış fiyatı kabul edilir.
-    # min(prices) kullanmak; kart içinde % indirimi, taksit tutarı veya
-    # başka küçük bir TL değeri varsa yanlışlıkla onu seçebiliyordu.
-    current = prices[0]
-    other_prices = prices[1:]
-    previous = max(other_prices) if other_prices else None
+    # Amazon kartlarında "Fırsatın Fiyatı" doğrudan ürünün güncel fiyatını,
+    # "Önceki" ise referans fiyatını gösteriyor. Kartın tamamındaki en küçük
+    # sayıyı seçmek güvenli değil; taksit/puan/başka ürün tutarları karışabiliyor.
+    if site == "Amazon":
+        current = labeled_price(best, ["Fırsatın Fiyatı:", "Fırsatın Fiyatı", "Teklif Fiyatı:", "Teklif Fiyatı"])
+        previous = labeled_price(best, ["Önceki:", "Önceki Fiyat:", "Önceki fiyat:"])
+        if current is None:
+            # Etiket bulunamazsa ilk açık TL tutarına geri dön.
+            prices = prices_from_text(best)
+            current = prices[0] if prices else None
+            other_prices = prices[1:] if prices else []
+            previous = max(other_prices) if other_prices else None
+        if current is None:
+            return None
+    else:
+        prices = prices_from_text(best)
+        if not prices:
+            return None
+        current = prices[0]
+        other_prices = prices[1:]
+        previous = max(other_prices) if other_prices else None
+
     if previous is not None and previous <= current:
         previous = None
 
