@@ -73,9 +73,20 @@ def clean_price(value):
     if not text:
         return None
     if "," in text and "." in text:
-        text = text.replace(".", "").replace(",", ".")
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
     elif "," in text:
-        text = text.replace(",", ".")
+        parts = text.rsplit(",", 1)
+        if len(parts[1]) in (1, 2):
+            text = parts[0].replace(".", "") + "." + parts[1]
+        else:
+            text = text.replace(",", "")
+    elif "." in text:
+        parts = text.rsplit(".", 1)
+        if len(parts[1]) not in (1, 2):
+            text = text.replace(".", "")
     try:
         return float(text)
     except ValueError:
@@ -84,12 +95,10 @@ def clean_price(value):
 
 def prices_from_text(text):
     vals = []
-    pattern = r"(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
+    pattern = r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)"
     for match in re.finditer(pattern, text, re.I):
-        # Amazon kartlarında "%5 ... 5 TL ... 2.659,05 TL" gibi metinler
-        # olabiliyor. Yüzde değerini fiyat olarak kabul etme.
-        start = match.start()
-        prefix = text[max(0, start - 2):start]
+        start = match.start(1)
+        prefix = text[max(0, start - 3):start]
         if "%" in prefix:
             continue
         p = clean_price(match.group(1))
@@ -137,10 +146,16 @@ def card_product(site, a, base_url):
     prices = prices_from_text(best)
     if not prices:
         return None
-    current = min(prices)
-    previous = max(prices) if len(prices) > 1 else None
+
+    # Karttaki ilk gerçek TL tutarı güncel satış fiyatı kabul edilir.
+    # min(prices) kullanmak; kart içinde % indirimi, taksit tutarı veya
+    # başka küçük bir TL değeri varsa yanlışlıkla onu seçebiliyordu.
+    current = prices[0]
+    other_prices = prices[1:]
+    previous = max(other_prices) if other_prices else None
     if previous is not None and previous <= current:
         previous = None
+
     name = a.get("aria-label") or a.get("title") or text
     name = re.sub(r"\s+", " ", name).strip()
     name = re.sub(r"(?:Sepete Ekle|Hızlı Bakış|Kargo Bedava)$", "", name).strip()
