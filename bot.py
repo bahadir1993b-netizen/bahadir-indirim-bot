@@ -114,7 +114,7 @@ def prices_from_text(text):
 
 def labeled_price(text, labels):
     for label in labels:
-        m = re.search(re.escape(label) + r"\s*(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
+        m = re.search(re.escape(label) + r"\s*(?:₺\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
         if m:
             value = clean_price(m.group(1))
             if value is not None and value > 0:
@@ -123,11 +123,10 @@ def labeled_price(text, labels):
 
 
 def hepsiburada_labeled_price(text, labels):
-    """HB kartındaki etiketli fiyatı al; kupon, taksit ve puan rakamlarını fiyat sanma."""
+    """HB'de etiketli gerçek fiyatı bul. Taksit/puan/kupon rakamlarını fiyat sanma."""
     for label in labels:
-        # Etiket ile fiyat arasında en fazla 120 karakter olsun; böylece kartın başka bölümündeki
-        # fiyatı yanlışlıkla eşleştirmeyelim.
-        pattern = re.escape(label) + r"[^0-9₺]{0,120}(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)?"
+        # Para birimi zorunlu: "Sepette 10" gibi metinleri yanlışlıkla fiyat kabul etme.
+        pattern = re.escape(label) + r"[^0-9₺]{0,70}(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
         m = re.search(pattern, text, re.I)
         if m:
             value = clean_price(m.group(1))
@@ -136,39 +135,72 @@ def hepsiburada_labeled_price(text, labels):
     return None
 
 
+def hepsiburada_price_candidates(text):
+    """HB kartındaki TL adaylarını bağlamına göre puanla."""
+    candidates = []
+    pattern = r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)"
+    negative = [
+        "taksit", "ay x", "x ay", "puan", "worldpuan", "parapuan", "bonus",
+        "parafpuan", "chip-para", "maximum puan", "kupon kazan", "kupon tutarı",
+        "indirim tutarı", "kazanç"
+    ]
+    positive = [
+        "fiyat", "satış fiyatı", "güncel fiyat", "peşin fiyat", "sepette", "sepetteki fiyat",
+        "sepette indirimli fiyat", "hemen al"
+    ]
+    old_price_words = ["eski fiyat", "önceki fiyat", "piyasa fiyatı"]
+
+    for match in re.finditer(pattern, text, re.I):
+        value = clean_price(match.group(1))
+        if value is None or value <= 0:
+            continue
+        start = match.start(1)
+        context = text[max(0, start - 100):min(len(text), match.end() + 80)].lower()
+        score = 0
+        if any(word in context for word in negative):
+            score -= 10
+        if any(word in context for word in positive):
+            score += 6
+        if any(word in context for word in old_price_words):
+            score -= 5
+        # Tek/çok düşük rakamlar çoğunlukla taksit veya puan olduğundan cezalandır.
+        if value < 100:
+            score -= 4
+        elif value >= 500:
+            score += 1
+        candidates.append((score, value, context))
+
+    return candidates
+
+
 def hepsiburada_prices(text):
-    """Hepsiburada kartından gerçek satış fiyatını ve varsa kupon sonrası fiyatı ayır."""
+    """Hepsiburada kartından gerçek satış fiyatını ve varsa görünen eski fiyatı ayır."""
     current = hepsiburada_labeled_price(text, [
-        "Sepette",
         "Sepetteki Fiyat",
         "Sepette indirimli fiyat",
+        "Sepette",
         "Peşin Fiyat",
         "Güncel Fiyat",
         "Satış Fiyatı",
     ])
-    if current is None:
-        # HB'nin ürün kartlarında çoğunlukla fiyat etiketiyle birlikte TL bulunur.
-        m = re.search(r"(?:Fiyat|fiyat)[^0-9]{0,80}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)", text, re.I)
-        if m:
-            current = clean_price(m.group(1))
 
-    # Son çare: TL ile biten rakamlardan yararlan, ancak puan/taksit/kupon yüzdesi
-    # gibi açıkça fiyat olmayan alanları ele.
-    prices = prices_from_text(text)
-    if current is None and prices:
-        candidates = [p for p in prices if p >= 1]
+    if current is None:
+        candidates = hepsiburada_price_candidates(text)
         if candidates:
-            current = candidates[0]
+            # Önce bağlam puanı, eşitlikte daha yüksek gerçek satış fiyatı.
+            candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            current = candidates[0][1]
+
+    if current is None:
+        return None, None
 
     previous = None
-    for label in ["Sepette", "Eski Fiyat", "Önceki Fiyat", "Piyasa Fiyatı"]:
-        # Eski fiyatı yalnızca açık etiketle yakala; rastgele daha büyük rakam seçme.
-        if label in ("Sepette",):
-            continue
+    for label in ["Eski Fiyat", "Önceki Fiyat", "Piyasa Fiyatı"]:
         previous = hepsiburada_labeled_price(text, [label])
         if previous is not None and previous > current:
             break
         previous = None
+
     return current, previous
 
 
@@ -332,94 +364,91 @@ def median(values):
     return (values[mid - 1] + values[mid]) / 2
 
 
-def process_product(p):
+def get_product(url):
+    rows = supabase_get("products", params={"select": "*", "product_url": f"eq.{url}", "limit": 1})
+    return rows[0] if rows else None
+
+
+def process_product(product):
     now = datetime.now(timezone.utc)
-    url = p["url"]
-    current = float(p["price"])
-    existing = get_existing(url)
+    url = product["url"]
+    site = product["site"]
+    current = float(product["price"])
+    previous_display = product.get("previous_display_price")
+    if previous_display is not None:
+        previous_display = float(previous_display)
+
+    existing = get_product(url)
     history = get_price_history(url)
-    history_prices = [float(x["price"]) for x in history]
-    previous_display = p.get("previous_display_price")
+    history_prices = [float(row["price"]) for row in history]
 
-    if not history:
-        record_price(url, p["site"], current, now.isoformat())
-        upsert_product(p, current, previous_display, None, now)
-        print(f"İlk kayıt: {p['site']} | {current:.2f} TL | geçmiş=1 | referans=None | paylaş=False")
-        return
-
-    last_history_price = history_prices[0]
-    if abs(last_history_price - current) >= 0.01:
-        record_price(url, p["site"], current, now.isoformat())
-        history_prices.insert(0, current)
+    if not history_prices or history_prices[-1] != current:
+        record_price(url, site, current, now.isoformat())
+        history_prices.append(current)
 
     reference = median(history_prices) if len(history_prices) >= MIN_HISTORY_SAMPLES else None
-    discount = ((reference - current) / reference * 100) if reference and reference > 0 else 0
-    last_posted_price = float(existing[0]["last_posted_price"]) if existing and existing[0].get("last_posted_price") is not None else None
-    last_posted_at = parse_dt(existing[0].get("last_posted_at")) if existing else None
+    discount = ((reference - current) / reference * 100) if reference and reference > 0 else None
 
-    should_post = reference is not None and discount >= MIN_DISCOUNT
-    if last_posted_price is not None and current >= last_posted_price:
-        should_post = False
-    if last_posted_at and (now - last_posted_at).total_seconds() < REPOST_COOLDOWN_HOURS * 3600:
-        should_post = False
+    last_posted_price = float(existing["last_posted_price"]) if existing and existing.get("last_posted_price") is not None else None
+    last_posted_at = datetime.fromisoformat(existing["last_posted_at"].replace("Z", "+00:00")) if existing and existing.get("last_posted_at") else None
 
-    upsert_product(p, current, previous_display, reference, now, last_posted_price if not should_post else current, now if should_post else last_posted_at)
+    should_post = False
+    if discount is not None and discount >= MIN_DISCOUNT:
+        if last_posted_price is None or current < last_posted_price:
+            if last_posted_at is None or now - last_posted_at >= timedelta(hours=REPOST_COOLDOWN_HOURS):
+                should_post = True
 
-    print(f"Kontrol: {p['site']} | anlık {current:.2f} -> {current:.2f} TL | 30g örnek={len(history_prices)} | referans={reference} | paylaş={should_post}")
-    if should_post:
-        pct = discount
-        old_text = f"\n🏷️ Görünen eski fiyat: {previous_display:,.2f} TL" if previous_display else ""
-        msg = f"🔥 YENİ DÜŞÜŞ!\n\n🛒 %{pct:.0f} İndirim\n\n{p['name']}{old_text}\n\n💰 Son 30 gün normal fiyatı: {reference:,.2f} TL\n🔥 Yeni fiyat: {current:,.2f} TL\n📉 Gerçek indirim: %{pct:.1f}\n🏪 {p['site']}\n\n🔗 {url}"
-        telegram_send(msg)
-
-
-def parse_dt(value):
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def get_existing(url):
-    return supabase_get("products", params={"select": "*", "product_url": f"eq.{url}", "limit": "1"})
-
-
-def upsert_product(p, current, previous_display, reference, now, last_posted_price=None, last_posted_at=None):
-    payload = {
-        "product_url": p["url"],
-        "product_name": p["name"],
-        "site": p["site"],
+    upsert = {
+        "product_url": url,
+        "product_name": product["name"],
+        "site": site,
         "current_price": current,
         "previous_price": previous_display,
-        "lowest_price": reference,
+        "lowest_price": min(history_prices) if history_prices else current,
         "last_seen_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
-    if last_posted_price is not None:
-        payload["last_posted_price"] = last_posted_price
-    if last_posted_at is not None:
-        payload["last_posted_at"] = last_posted_at.isoformat()
-    supabase_upsert(payload)
+
+    if should_post:
+        old_text = f"\n🏷️ Görünen eski fiyat: {previous_display:,.2f} TL" if previous_display else ""
+        text = (
+            "🔥 YENİ DÜŞÜŞ!\n\n"
+            f"🛒 {product['name']}\n\n"
+            f"💰 Son 30 gün normal fiyatı: {reference:,.2f} TL\n"
+            f"🔥 Yeni fiyat: {current:,.2f} TL\n"
+            f"📉 Gerçek indirim: %{discount:.1f}\n"
+            f"🏪 {site}"
+            f"{old_text}\n\n"
+            f"🔗 {url}"
+        )
+        telegram_send(text)
+        upsert["last_posted_price"] = current
+        upsert["last_posted_at"] = now.isoformat()
+
+    supabase_upsert(upsert)
+
+    if reference is None:
+        print(f"Kontrol: {site} | anlık {current:.2f} -> {current:.2f} TL | 30g örnek={len(history_prices)} | referans=None | paylaş=False")
+    else:
+        print(f"Kontrol: {site} | anlık {current:.2f} -> {current:.2f} TL | 30g örnek={len(history_prices)} | referans={reference:.2f} | indirim=%{discount:.1f} | paylaş={should_post}")
 
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        total = 0
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--no-sandbox"])
         try:
+            all_products = []
             for site, seed in SEEDS.items():
                 try:
                     products = discover(site, seed, browser)
+                    all_products.extend(products)
                     for product in products:
                         process_product(product)
-                    total += len(products)
                 except Exception as e:
                     print(f"{site} hata: {type(e).__name__}: {e}")
+            print(f"Toplam işlenen ürün: {len(all_products)}")
         finally:
             browser.close()
-        print(f"Toplam işlenen ürün: {total}")
 
 
 if __name__ == "__main__":
