@@ -22,10 +22,20 @@ jobs:
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
 
+      - name: Playwright cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
+
       - name: Chromium kur
-        run: python -m playwright install --with-deps chromium
+        timeout-minutes: 4
+        run: python -m playwright install chromium
 
       - name: Botu çalıştır
+        timeout-minutes: 5
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
