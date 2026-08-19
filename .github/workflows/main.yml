@@ -53,6 +53,9 @@ jobs:
           r.raise_for_status()
           PY
 
+      - name: Yanlış indirim tespitini düzelt
+        run: python runtime_patch.py
+
       - name: Botu çalıştır
         timeout-minutes: 8
         env:
