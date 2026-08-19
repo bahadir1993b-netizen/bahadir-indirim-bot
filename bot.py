@@ -1,7 +1,6 @@
 import os
 import re
 from datetime import datetime, timezone, timedelta
-from statistics import median
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
@@ -28,9 +27,9 @@ SEEDS = {
 
 MIN_DISCOUNT = 40.0
 REPOST_COOLDOWN_HOURS = 12
-HISTORY_DAYS = 30
-MIN_HISTORY_OBSERVATIONS = 3
 MAX_PRODUCTS_PER_SITE = 12
+PRICE_HISTORY_DAYS = 30
+MIN_HISTORY_SAMPLES = 3
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -68,29 +67,24 @@ def supabase_upsert(product):
     return data[0] if data else product
 
 
-def get_price_history(url):
-    encoded = requests.utils.quote(url, safe="")
-    since = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).isoformat()
-    query = (
-        f"price_history?select=price,observed_at&product_url=eq.{encoded}"
-        f"&observed_at=gte.{requests.utils.quote(since, safe='')}&order=observed_at.desc&limit=500"
-    )
-    return supabase_get(query)
-
-
-def record_price_history(url, site, price, observed_at):
+def record_price(url, site, price, recorded_at):
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/price_history",
         headers=supabase_headers("return=minimal"),
-        json={
-            "product_url": url,
-            "site": site,
-            "price": price,
-            "observed_at": observed_at,
-        },
+        json={"product_url": url, "site": site, "price": price, "recorded_at": recorded_at},
         timeout=20,
     )
     r.raise_for_status()
+
+
+def get_price_history(url, days=PRICE_HISTORY_DAYS):
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    encoded_url = requests.utils.quote(url, safe="")
+    query = (
+        f"price_history?select=price,recorded_at&product_url=eq.{encoded_url}"
+        f"&recorded_at=gte.{requests.utils.quote(cutoff, safe=':+-T.')}&order=recorded_at.desc"
+    )
+    return supabase_get(query)
 
 
 def clean_price(value):
@@ -264,87 +258,72 @@ def send_telegram(text):
     print("Telegram gönderildi")
 
 
+def median(values):
+    values = sorted(float(v) for v in values)
+    n = len(values)
+    if not n:
+        return None
+    mid = n // 2
+    if n % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2
+
+
 def process(product):
     url = product["url"]
     current = float(product["price"])
     now = datetime.now(timezone.utc)
 
-    # Önce geçmişi oku; böylece Amazon'un "Önceki" alanındaki aylar önceki
-    # yüksek fiyatı gerçek indirim kabul etmiyoruz.
-    history = get_price_history(url)
-    historical_prices = []
-    for row in history:
-        try:
-            p = float(row.get("price"))
-            if p > 0:
-                historical_prices.append(p)
-        except (TypeError, ValueError):
-            pass
+    # Her gözlemi önce kaydet; böylece sonraki çalışmalarda gerçek fiyat geçmişimiz oluşur.
+    record_price(url, product["site"], current, now.isoformat())
+    history_rows = get_price_history(url)
+    history_prices = [float(row["price"]) for row in history_rows if row.get("price") is not None]
 
-    reference_price = median(historical_prices) if len(historical_prices) >= MIN_HISTORY_OBSERVATIONS else None
-    history_low = min(historical_prices) if historical_prices else None
-    discount = ((reference_price - current) / reference_price * 100) if reference_price and current < reference_price else 0
+    # Az veri varsa Amazon'un "Önceki" fiyatını ciddi indirim kabul etmiyoruz.
+    history_ready = len(history_prices) >= MIN_HISTORY_SAMPLES
+    reference_price = median(history_prices) if history_ready else None
 
     rows = get_existing(url)
     existing = rows[0] if rows else None
-    last_posted_price = float(existing["last_posted_price"]) if existing and existing.get("last_posted_price") else None
-    last_posted_at = existing.get("last_posted_at") if existing else None
 
+    if not existing:
+        should_post = False
+        discount = 0.0
+        if reference_price and reference_price > current:
+            discount = (reference_price - current) / reference_price * 100
+            should_post = discount >= MIN_DISCOUNT
+        last_posted = now.isoformat() if should_post else None
+        if should_post:
+            text = f"🔥 CİDDİ İNDİRİM!\n\n🛒 {product['name']}\n\n💰 Son 30 gün normal fiyatı: {reference_price:,.2f} TL\n🔥 Yeni fiyat: {current:,.2f} TL\n📉 Gerçek indirim: %{discount:.1f}\n🏪 {product['site']}\n\n🔗 {url}"
+            send_telegram(text)
+        supabase_upsert({"product_url": url, "product_name": product["name"], "site": product["site"], "current_price": current, "previous_price": current, "lowest_price": current, "last_posted_price": current if should_post else None, "last_posted_at": last_posted, "last_seen_at": now.isoformat(), "updated_at": now.isoformat()})
+        print(f"İlk kayıt: {product['site']} | {current:.2f} TL | geçmiş={len(history_prices)} | referans={reference_price} | paylaş={should_post}")
+        return
+
+    previous = float(existing.get("current_price") or current)
+    lowest = float(existing.get("lowest_price") or previous)
+    last_posted = existing.get("last_posted_at")
     cooldown_ok = True
-    if last_posted_at:
+    if last_posted:
         try:
-            cooldown_ok = now - datetime.fromisoformat(last_posted_at.replace("Z", "+00:00")) >= timedelta(hours=REPOST_COOLDOWN_HOURS)
+            cooldown_ok = now - datetime.fromisoformat(last_posted.replace("Z", "+00:00")) >= timedelta(hours=REPOST_COOLDOWN_HOURS)
         except Exception:
             pass
 
-    # İlk gözlemde paylaşım yok. En az birkaç geçmiş gözlem oluştuktan sonra
-    # son 30 günün tipik (medyan) fiyatına göre gerçek düşüş hesaplanır.
-    should_post = (
-        reference_price is not None
-        and discount >= MIN_DISCOUNT
-        and cooldown_ok
-        and (last_posted_price is None or current < last_posted_price)
-    )
+    # Gerçek indirim, bir önceki taramadaki fiyata değil son 30 günlük geçmişe göre hesaplanır.
+    discount = 0.0
+    if reference_price and reference_price > current:
+        discount = (reference_price - current) / reference_price * 100
 
-    # Fiyat geçmişine bu taramayı ekle.
-    try:
-        record_price_history(url, product["site"], current, now.isoformat())
-    except Exception as e:
-        # Geçmiş tablosu yoksa/erişilemiyorsa güvenli tarafta kal: yanlış indirim paylaşma.
-        print(f"Fiyat geçmişi kaydedilemedi: {type(e).__name__}: {e}")
-        should_post = False
-
-    lowest = min(float(existing.get("lowest_price") or current), current) if existing else current
+    should_post = history_ready and discount >= MIN_DISCOUNT and cooldown_ok and current < previous
 
     if should_post:
-        ref_text = f"{reference_price:,.2f} TL"
-        text = f"🔥 CİDDİ İNDİRİM!\n\n🛒 {product['name']}\n\n💰 Son 30 gün referans fiyatı: {ref_text}\n🔥 Yeni fiyat: {current:,.2f} TL\n📉 Gerçek indirim: %{discount:.1f}\n🏪 {product['site']}\n\n🔗 {url}"
+        text = f"🔥 YENİ DÜŞÜŞ!\n\n🛒 {product['name']}\n\n💰 Son 30 gün normal fiyatı: {reference_price:,.2f} TL\n🔥 Yeni fiyat: {current:,.2f} TL\n📉 Gerçek indirim: %{discount:.1f}\n🏪 {product['site']}\n\n🔗 {url}"
         send_telegram(text)
-        last_posted_price = current
-        last_posted_at = now.isoformat()
+        last_posted = now.isoformat()
 
-    supabase_upsert({
-        "product_url": url,
-        "product_name": product["name"],
-        "site": product["site"],
-        "current_price": current,
-        "previous_price": float(existing.get("current_price") or current) if existing else current,
-        "lowest_price": lowest,
-        "last_posted_price": last_posted_price,
-        "last_posted_at": last_posted_at,
-        "last_seen_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-    })
-
-    print(
-        f"Kontrol: {product['site']} | {current:.2f} TL | "
-        f"30g medyan={reference_price:.2f} TL" if reference_price else
-        f"Kontrol: {product['site']} | {current:.2f} TL | 30g geçmiş yetersiz"
-    )
-    if history_low is not None:
-        print(f"30g en düşük: {history_low:.2f} TL | gerçek indirim: %{discount:.1f} | paylaş={should_post}")
-    else:
-        print(f"Gerçek indirim: %{discount:.1f} | paylaş={should_post}")
+    supabase_upsert({"product_url": url, "product_name": product["name"], "site": product["site"], "current_price": current, "previous_price": previous, "lowest_price": min(lowest, current), "last_posted_price": current if should_post else existing.get("last_posted_price"), "last_posted_at": last_posted, "last_seen_at": now.isoformat(), "updated_at": now.isoformat()})
+    print(f"Kontrol: {product['site']} | anlık {previous:.2f} -> {current:.2f} TL | 30g örnek={len(history_prices)} | referans={reference_price} | gerçek indirim=%{discount:.1f} | paylaş={should_post}")
 
 
 def main():
