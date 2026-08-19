@@ -13,37 +13,32 @@ SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36",
     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# İlk sürümde fırsat/indirim sayfalarından ürün keşfediyoruz.
 SEEDS = {
     "Amazon": "https://www.amazon.com.tr/gp/goldbox",
     "Hepsiburada": "https://www.hepsiburada.com/kampanyalar",
-    "Trendyol": "https://www.trendyol.com/",
+    "Trendyol": "https://www.trendyol.com/butik-x-b175196",
     "Pazarama": "https://www.pazarama.com/son-30-gunun-en-dusuk-fiyatli-urunleri-k-VRTCTGRY",
 }
 
 MIN_DISCOUNT = 40.0
 REPOST_COOLDOWN_HOURS = 12
-MAX_PRODUCTS_PER_SITE = 8
+MAX_PRODUCTS_PER_SITE = 12
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
 
 def supabase_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
+    return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
 
 
-def supabase_get(url):
-    r = session.get(f"{SUPABASE_URL}/rest/v1/{url}", headers=supabase_headers(), timeout=20)
+def supabase_get(query):
+    r = session.get(f"{SUPABASE_URL}/rest/v1/{query}", headers=supabase_headers(), timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -77,6 +72,15 @@ def clean_price(value):
         return None
 
 
+def prices_from_text(text):
+    vals = []
+    for m in re.findall(r"(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)", text, re.I):
+        p = clean_price(m)
+        if p is not None and p > 0:
+            vals.append(p)
+    return vals
+
+
 def jsonld_products(soup, page_url):
     found = []
     for tag in soup.find_all("script", type="application/ld+json"):
@@ -85,13 +89,15 @@ def jsonld_products(soup, page_url):
         except Exception:
             continue
         items = data if isinstance(data, list) else [data]
-        for item in items:
-            if isinstance(item, dict) and item.get("@graph"):
-                items += item["@graph"]
-        for item in items:
+        queue = list(items)
+        while queue:
+            item = queue.pop(0)
             if not isinstance(item, dict):
                 continue
-            if item.get("@type") == "Product" or "Product" in (item.get("@type") or []):
+            if item.get("@graph"):
+                queue.extend(item["@graph"])
+            typ = item.get("@type")
+            if typ == "Product" or (isinstance(typ, list) and "Product" in typ):
                 name = item.get("name")
                 offers = item.get("offers")
                 if isinstance(offers, list):
@@ -107,75 +113,86 @@ def jsonld_products(soup, page_url):
     return found
 
 
-def product_links(soup, base_url):
-    host = urlparse(base_url).netloc
-    links = []
-    seen = set()
-    for a in soup.find_all("a", href=True):
-        href = urljoin(base_url, a["href"])
-        parsed = urlparse(href)
-        if parsed.netloc != host:
-            continue
-        if href in seen:
-            continue
-        text = a.get_text(" ", strip=True)
-        if len(text) < 15:
-            continue
-        # Ürün bağlantılarında genellikle bu izler bulunur; kampanya/menü linklerini ele.
-        bad = ("/kampanyalar", "/butik", "/magaza", "/kategori", "/blog", "/yardim", "/hesabim")
-        if any(x in parsed.path.lower() for x in bad):
-            continue
-        seen.add(href)
-        links.append(href)
-        if len(links) >= MAX_PRODUCTS_PER_SITE * 2:
+def likely_product_url(site, path):
+    p = path.lower()
+    if site == "Amazon":
+        return "/dp/" in p or "/gp/product/" in p
+    if site == "Hepsiburada":
+        return "-p-" in p
+    if site == "Trendyol":
+        return "/urun/" in p
+    if site == "Pazarama":
+        return "/" in p and len(p.strip("/")) > 10
+    return False
+
+
+def card_product(site, a, base_url):
+    href = urljoin(base_url, a.get("href", ""))
+    parsed = urlparse(href)
+    if not likely_product_url(site, parsed.path):
+        return None
+    text = a.get_text(" ", strip=True)
+    if len(text) < 10:
+        return None
+    node = a
+    best = text
+    for _ in range(4):
+        node = node.parent
+        if not node:
             break
-    return links
-
-
-def fetch_product(site, url):
-    try:
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        products = jsonld_products(soup, url)
-        if products:
-            p = products[0]
-            p["site"] = site
-            return p
-    except Exception as e:
-        print(f"{site} ürün okunamadı: {url} -> {e}")
-    return None
+        t = node.get_text(" ", strip=True)
+        if len(t) > len(best) and len(t) < 1800:
+            best = t
+    prices = prices_from_text(best)
+    if not prices:
+        return None
+    current = min(prices)
+    previous = max(prices) if len(prices) > 1 else None
+    if previous is not None and previous <= current:
+        previous = None
+    name = re.sub(r"\s+", " ", text).strip()
+    name = re.sub(r"(?:Sepete Ekle|Hızlı Bakış|Kargo Bedava)$", "", name).strip()
+    return {"name": name[:300], "price": current, "previous_display_price": previous, "url": href, "site": site}
 
 
 def discover(site, seed_url):
     try:
-        r = session.get(seed_url, timeout=25)
+        r = session.get(seed_url, timeout=30, allow_redirects=True)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+        print(f"Sayfa HTTP: {r.status_code} | {len(r.text)} karakter")
     except Exception as e:
         print(f"{site} seed okunamadı: {e}")
         return []
 
-    # Bazı sayfalar doğrudan Product JSON-LD içeriyor.
-    direct = jsonld_products(soup, seed_url)
-    if direct:
-        for p in direct:
-            p["site"] = site
-        return direct[:MAX_PRODUCTS_PER_SITE]
-
     results = []
-    for url in product_links(soup, seed_url):
-        p = fetch_product(site, url)
-        if p:
+    seen = set()
+
+    # Önce standart Product JSON-LD.
+    for p in jsonld_products(soup, r.url):
+        p["site"] = site
+        if p["url"] not in seen:
+            seen.add(p["url"])
             results.append(p)
+            if len(results) >= MAX_PRODUCTS_PER_SITE:
+                return results
+
+    # Sonra ürün kartlarının görünen HTML metnini kullan.
+    for a in soup.find_all("a", href=True):
+        p = card_product(site, a, r.url)
+        if not p or p["url"] in seen:
+            continue
+        seen.add(p["url"])
+        results.append(p)
         if len(results) >= MAX_PRODUCTS_PER_SITE:
             break
+
     return results
 
 
 def get_existing(url):
-    rows = supabase_get(f"products?select=*&product_url=eq.{requests.utils.quote(url, safe='')}")
-    return rows[0] if rows else None
+    encoded = requests.utils.quote(url, safe="")
+    return supabase_get(f"products?select=*&product_url=eq.{encoded}")[0:1]
 
 
 def send_telegram(text):
@@ -191,10 +208,26 @@ def send_telegram(text):
 def process(product):
     url = product["url"]
     current = product["price"]
-    existing = get_existing(url)
+    rows = get_existing(url)
+    existing = rows[0] if rows else None
     now = datetime.now(timezone.utc)
 
     if not existing:
+        display_old = product.get("previous_display_price")
+        display_discount = ((display_old - current) / display_old * 100) if display_old and display_old > current else 0
+        should_post = display_discount >= MIN_DISCOUNT
+        last_posted = now.isoformat() if should_post else None
+        if should_post:
+            text = (
+                "🔥 CİDDİ İNDİRİM!\n\n"
+                f"🛒 {product['name']}\n\n"
+                f"💰 Önceki fiyat: {display_old:,.2f} TL\n"
+                f"🔥 Yeni fiyat: {current:,.2f} TL\n"
+                f"📉 İndirim: %{display_discount:.1f}\n"
+                f"🏪 {product['site']}\n\n"
+                f"🔗 {url}"
+            )
+            send_telegram(text)
         supabase_upsert({
             "product_url": url,
             "product_name": product["name"],
@@ -202,41 +235,34 @@ def process(product):
             "current_price": current,
             "previous_price": current,
             "lowest_price": current,
+            "last_posted_price": current if should_post else None,
+            "last_posted_at": last_posted,
             "last_seen_at": now.isoformat(),
             "updated_at": now.isoformat(),
         })
-        print(f"İlk kayıt: {product['site']} | {product['name']} | {current:.2f} TL")
+        print(f"İlk kayıt: {product['site']} | {current:.2f} TL | ekrandaki eski={display_old} | paylaş={should_post}")
         return
 
-    previous = float(existing.get("current_price") or existing.get("previous_price") or current)
+    previous = float(existing.get("current_price") or current)
     lowest = float(existing.get("lowest_price") or previous)
     last_posted = existing.get("last_posted_at")
     cooldown_ok = True
     if last_posted:
         try:
-            posted_dt = datetime.fromisoformat(last_posted.replace("Z", "+00:00"))
-            cooldown_ok = now - posted_dt >= timedelta(hours=REPOST_COOLDOWN_HOURS)
+            cooldown_ok = now - datetime.fromisoformat(last_posted.replace("Z", "+00:00")) >= timedelta(hours=REPOST_COOLDOWN_HOURS)
         except Exception:
             pass
 
-    # Botun kendi fiyat geçmişine göre gerçek düşüş.
-    discount = ((previous - current) / previous * 100) if previous > 0 else 0
-    new_low = current < lowest
-
-    should_post = discount >= MIN_DISCOUNT and cooldown_ok
-
-    # Aynı fiyat tekrar geldiyse paylaşma. Daha düşük fiyat geldiğinde tekrar paylaşabilsin.
-    if current >= previous:
-        should_post = False
+    discount = ((previous - current) / previous * 100) if previous > current else 0
+    should_post = discount >= MIN_DISCOUNT and cooldown_ok and current < previous
 
     if should_post:
-        label = "🔥 YENİ DÜŞÜŞ!" if new_low else "🔥 CİDDİ İNDİRİM!"
         text = (
-            f"{label}\n\n"
+            "🔥 YENİ DÜŞÜŞ!\n\n"
             f"🛒 {product['name']}\n\n"
             f"💰 Önceki fiyat: {previous:,.2f} TL\n"
             f"🔥 Yeni fiyat: {current:,.2f} TL\n"
-            f"📉 İndirim: %{discount:.1f}\n"
+            f"📉 Ekstra düşüş: %{discount:.1f}\n"
             f"🏪 {product['site']}\n\n"
             f"🔗 {url}"
         )
@@ -255,7 +281,7 @@ def process(product):
         "last_seen_at": now.isoformat(),
         "updated_at": now.isoformat(),
     })
-    print(f"Kontrol: {product['site']} | {current:.2f} TL | %{discount:.1f} | paylaş={should_post}")
+    print(f"Kontrol: {product['site']} | {previous:.2f} -> {current:.2f} TL | %{discount:.1f} | paylaş={should_post}")
 
 
 def main():
