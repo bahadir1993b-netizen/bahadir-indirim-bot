@@ -56,11 +56,13 @@ def unwrap(u):
     return u
 
 def candidates(site,html,base):
-    html=html.replace('\\/','/').replace('\\u002F','/')
+    html=html.replace('\\/','/').replace('\\u002F','/').replace('&amp;','&')
     soup=BeautifulSoup(html,'html.parser');out=[];seen=set()
     def add(raw,title='Ürün'):
+        if not raw:return
         u=canonical(urljoin(base,unwrap(raw)))
-        if valid(site,u) and u not in seen:seen.add(u);out.append((u,re.sub(r'\s+',' ',title or 'Ürün').strip()[:250]))
+        if valid(site,u) and u not in seen:
+            seen.add(u);out.append((u,re.sub(r'\s+',' ',title or 'Ürün').strip()[:250]))
     for a in soup.find_all('a',href=True):
         add(a.get('href'),a.get('title') or a.get('aria-label') or a.get_text(' ',strip=True))
         if len(out)>=MAX_PRODUCTS_PER_SITE:return out
@@ -72,6 +74,37 @@ def candidates(site,html,base):
         if len(out)>=MAX_PRODUCTS_PER_SITE:break
     print(f'{site} adaylar: {[u for u,_ in out]}');return out
 
+def sitemap_fallback(site):
+    domain='https://www.hepsiburada.com' if site=='Hepsiburada' else 'https://www.trendyol.com'
+    try:
+        r=requests.get(domain+'/sitemap.xml',headers=HEADERS,timeout=6)
+        print(f'{site} sitemap HTTP: {r.status_code}')
+        if not r.ok:return []
+        xml=r.text[:2000000]
+        locs=re.findall(r'<loc>\s*(.*?)\s*</loc>',xml,re.I|re.S)
+        product_sitemaps=[u for u in locs if 'sitemap' in u.lower()]
+        pages=product_sitemaps[:4] if product_sitemaps else [domain+'/sitemap.xml']
+        out=[]
+        for sm in pages:
+            try:
+                rr=requests.get(unescape_xml(sm),headers=HEADERS,timeout=6)
+                if not rr.ok:continue
+                text=unescape_xml(rr.text[:3000000])
+                urls=re.findall(r'<loc>\s*(https?://[^<\s]+)\s*</loc>',text,re.I)
+                for u in urls:
+                    u=canonical(u)
+                    if valid(site,u) and all(u!=x[0] for x in out):
+                        out.append((u,'Ürün'))
+                        if len(out)>=MAX_PRODUCTS_PER_SITE:return out
+            except Exception:pass
+        print(f'{site} sitemap adaylar: {[u for u,_ in out]}')
+        return out
+    except Exception as e:
+        print(f'{site} sitemap hata: {type(e).__name__}: {e}');return []
+
+def unescape_xml(s):
+    return s.replace('&amp;','&').replace('&quot;','"').replace('&#x2F;','/').replace('&#47;','/')
+
 def discover(site,seed,browser):
     page=browser.new_page();page.set_default_timeout(2500);page.set_default_navigation_timeout(12000)
     try:
@@ -82,22 +115,24 @@ def discover(site,seed,browser):
     finally:page.close()
 
 def search_fallback(site):
-    domain='hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com';q=quote(f'site:{domain} ürün')
-    for engine in ('bing','google'):
-        try:
-            u=f'https://www.{engine}.com/search?q={q}';r=requests.get(u,headers=HEADERS,timeout=4)
-            print(f'{site} {engine} HTTP: {r.status_code}')
-            if r.ok:
-                got=candidates(site,r.text,u)
-                if got:return got
-        except Exception as e:print(f'{site} {engine} hata: {type(e).__name__}: {e}')
-    return []
+    domain='hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com'
+    terms=['elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam','indirim']
+    for term in terms:
+        q=quote(f'site:{domain} {term}')
+        for engine in ('bing','google'):
+            try:
+                u=f'https://www.{engine}.com/search?q={q}';r=requests.get(u,headers=HEADERS,timeout=4)
+                print(f'{site} {engine} [{term}] HTTP: {r.status_code}')
+                if r.ok:
+                    got=candidates(site,r.text,u)
+                    if got:return got
+            except Exception as e:print(f'{site} {engine} hata: {type(e).__name__}: {e}')
+    return sitemap_fallback(site)
 
 def jsonld(html):
     for s in BeautifulSoup(html,'html.parser').find_all('script',type='application/ld+json'):
         try:
-            x=json.loads(s.string or s.get_text())
-            stack=x if isinstance(x,list) else [x]
+            x=json.loads(s.string or s.get_text());stack=x if isinstance(x,list) else [x]
             for o in stack:
                 if isinstance(o,dict) and (o.get('@type')=='Product' or 'Product' in (o.get('@type') or [])):
                     off=o.get('offers') or {};off=off[0] if isinstance(off,list) and off else off
@@ -164,6 +199,7 @@ def process(p):
             except:pass
         msg=f"🔥 %{disc:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {p['price']:,.2f} TL\n🏷️ Önce: {base:,.2f} TL\n🛍️ {p['site']} 🔗 {p['url']}"
         r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':msg},timeout=8)
+        print(f'Telegram gönderim HTTP: {r.status_code}')
         if r.ok:
             try:sb('PATCH',f'products?id=eq.{row.get("id")}',json={'last_posted_at':now,'last_posted_price':p['price']})
             except:pass
