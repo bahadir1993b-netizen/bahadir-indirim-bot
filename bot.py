@@ -25,7 +25,7 @@ SEEDS = {
     "Pazarama": "https://www.pazarama.com/son-30-gunun-en-dusuk-fiyatli-urunleri-k-VRTCTGRY",
 }
 
-MIN_DISCOUNT = 40.0
+MIN_DISCOUNT = 30.0
 REPOST_COOLDOWN_HOURS = 12
 MAX_PRODUCTS_PER_SITE = 12
 PRICE_HISTORY_DAYS = 30
@@ -36,12 +36,7 @@ session.headers.update(HEADERS)
 
 
 def supabase_headers(prefer=None):
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Content-Type": "application/json",
-        "User-Agent": "bahadir-indirim-bot/1.0",
-        "Accept": "application/json",
-    }
+    headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json", "User-Agent": "bahadir-indirim-bot/1.0", "Accept": "application/json"}
     if SUPABASE_KEY.startswith("eyJ"):
         headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     if prefer:
@@ -56,34 +51,21 @@ def supabase_get(query):
 
 
 def supabase_upsert(product):
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/products?on_conflict=product_url",
-        headers=supabase_headers("resolution=merge-duplicates,return=representation"),
-        json=product,
-        timeout=20,
-    )
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/products?on_conflict=product_url", headers=supabase_headers("resolution=merge-duplicates,return=representation"), json=product, timeout=20)
     r.raise_for_status()
     data = r.json()
     return data[0] if data else product
 
 
 def record_price(url, site, price, recorded_at):
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/price_history",
-        headers=supabase_headers("return=minimal"),
-        json={"product_url": url, "site": site, "price": price, "recorded_at": recorded_at},
-        timeout=20,
-    )
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/price_history", headers=supabase_headers("return=minimal"), json={"product_url": url, "site": site, "price": price, "recorded_at": recorded_at}, timeout=20)
     r.raise_for_status()
 
 
 def get_price_history(url, days=PRICE_HISTORY_DAYS):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     encoded_url = requests.utils.quote(url, safe="")
-    query = (
-        f"price_history?select=price,recorded_at&product_url=eq.{encoded_url}"
-        f"&recorded_at=gte.{requests.utils.quote(cutoff, safe=':+-T.')}&order=recorded_at.desc"
-    )
+    query = f"price_history?select=price,recorded_at&product_url=eq.{encoded_url}&recorded_at=gte.{requests.utils.quote(cutoff, safe=':+-T.')}&order=recorded_at.desc"
     return supabase_get(query)
 
 
@@ -236,6 +218,7 @@ def discover(site, seed_url, browser):
             results.append(p)
             if len(results) >= MAX_PRODUCTS_PER_SITE:
                 break
+        print(f"{site}: {len(results)} ürün bulundu")
         return results
     except PlaywrightTimeoutError as e:
         print(f"{site} zaman aşımı: {e}")
@@ -274,12 +257,14 @@ def process(product):
     current = float(product["price"])
     now = datetime.now(timezone.utc)
 
-    # Her gözlemi önce kaydet; böylece sonraki çalışmalarda gerçek fiyat geçmişimiz oluşur.
-    record_price(url, product["site"], current, now.isoformat())
+    # Aynı fiyatı her 5 dakikada tekrar kaydetme; yalnızca fiyat değişince yeni gözlem ekle.
     history_rows = get_price_history(url)
     history_prices = [float(row["price"]) for row in history_rows if row.get("price") is not None]
+    last_history_price = history_prices[0] if history_prices else None
+    if last_history_price is None or abs(last_history_price - current) >= 0.01:
+        record_price(url, product["site"], current, now.isoformat())
+        history_prices.append(current)
 
-    # Az veri varsa Amazon'un "Önceki" fiyatını ciddi indirim kabul etmiyoruz.
     history_ready = len(history_prices) >= MIN_HISTORY_SAMPLES
     reference_price = median(history_prices) if history_ready else None
 
@@ -310,7 +295,6 @@ def process(product):
         except Exception:
             pass
 
-    # Gerçek indirim, bir önceki taramadaki fiyata değil son 30 günlük geçmişe göre hesaplanır.
     discount = 0.0
     if reference_price and reference_price > current:
         discount = (reference_price - current) / reference_price * 100
@@ -327,23 +311,21 @@ def process(product):
 
 
 def main():
-    total = 0
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"])
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         try:
-            for site, seed in SEEDS.items():
-                print(f"\n=== {site} ===")
-                products = discover(site, seed, browser)
-                print(f"Bulunan ürün: {len(products)}")
+            total = 0
+            for site, seed_url in SEEDS.items():
+                products = discover(site, seed_url, browser)
                 for product in products:
                     try:
                         process(product)
                         total += 1
                     except Exception as e:
-                        print(f"Ürün işlenemedi: {product.get('url')} -> {e}")
+                        print(f"Ürün işleme hatası ({site}): {type(e).__name__}: {e}")
+            print(f"Toplam işlenen ürün: {total}")
         finally:
             browser.close()
-    print(f"\nToplam işlenen ürün: {total}")
 
 
 if __name__ == "__main__":
