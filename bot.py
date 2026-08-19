@@ -1,11 +1,11 @@
 import os
 import re
-import json
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID = "-1004424116637"
@@ -34,7 +34,11 @@ session.headers.update(HEADERS)
 
 
 def supabase_headers():
-    return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
 
 
 def supabase_get(query):
@@ -74,43 +78,12 @@ def clean_price(value):
 
 def prices_from_text(text):
     vals = []
-    for m in re.findall(r"(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)", text, re.I):
+    pattern = r"(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
+    for m in re.findall(pattern, text, re.I):
         p = clean_price(m)
         if p is not None and p > 0:
             vals.append(p)
     return vals
-
-
-def jsonld_products(soup, page_url):
-    found = []
-    for tag in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(tag.string or tag.get_text())
-        except Exception:
-            continue
-        items = data if isinstance(data, list) else [data]
-        queue = list(items)
-        while queue:
-            item = queue.pop(0)
-            if not isinstance(item, dict):
-                continue
-            if item.get("@graph"):
-                queue.extend(item["@graph"])
-            typ = item.get("@type")
-            if typ == "Product" or (isinstance(typ, list) and "Product" in typ):
-                name = item.get("name")
-                offers = item.get("offers")
-                if isinstance(offers, list):
-                    offers = offers[0] if offers else {}
-                if isinstance(offers, dict):
-                    price = clean_price(offers.get("price"))
-                    currency = offers.get("priceCurrency", "TRY")
-                    url = offers.get("url") or item.get("url") or page_url
-                else:
-                    price, currency, url = None, "TRY", item.get("url") or page_url
-                if name and price and currency in ("TRY", "TL", "YTL"):
-                    found.append({"name": name.strip(), "price": price, "url": urljoin(page_url, url)})
-    return found
 
 
 def likely_product_url(site, path):
@@ -120,9 +93,10 @@ def likely_product_url(site, path):
     if site == "Hepsiburada":
         return "-p-" in p
     if site == "Trendyol":
-        return "/urun/" in p
+        return "-p-" in p and len(p.strip("/")) > 10
     if site == "Pazarama":
-        return "/" in p and len(p.strip("/")) > 10
+        parts = [x for x in p.split("/") if x]
+        return len(parts) >= 2 and any(ch.isdigit() for ch in p)
     return False
 
 
@@ -131,63 +105,97 @@ def card_product(site, a, base_url):
     parsed = urlparse(href)
     if not likely_product_url(site, parsed.path):
         return None
+
     text = a.get_text(" ", strip=True)
-    if len(text) < 10:
+    if len(text) < 5:
         return None
+
     node = a
     best = text
-    for _ in range(4):
+    for _ in range(5):
         node = node.parent
         if not node:
             break
         t = node.get_text(" ", strip=True)
-        if len(t) > len(best) and len(t) < 1800:
+        if len(t) > len(best) and len(t) < 2200:
             best = t
+
     prices = prices_from_text(best)
     if not prices:
         return None
+
     current = min(prices)
     previous = max(prices) if len(prices) > 1 else None
     if previous is not None and previous <= current:
         previous = None
-    name = re.sub(r"\s+", " ", text).strip()
+
+    name = a.get("aria-label") or a.get("title") or text
+    name = re.sub(r"\s+", " ", name).strip()
     name = re.sub(r"(?:Sepete Ekle|Hızlı Bakış|Kargo Bedava)$", "", name).strip()
-    return {"name": name[:300], "price": current, "previous_display_price": previous, "url": href, "site": site}
+    if len(name) < 5:
+        return None
+
+    return {
+        "name": name[:300],
+        "price": current,
+        "previous_display_price": previous,
+        "url": href,
+        "site": site,
+    }
 
 
-def discover(site, seed_url):
+def discover(site, seed_url, browser):
+    context = browser.new_context(
+        locale="tr-TR",
+        timezone_id="Europe/Istanbul",
+        user_agent=HEADERS["User-Agent"],
+        viewport={"width": 1440, "height": 1000},
+        extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
+    )
+    page = context.new_page()
     try:
-        r = session.get(seed_url, timeout=30, allow_redirects=True)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        print(f"Sayfa HTTP: {r.status_code} | {len(r.text)} karakter")
-    except Exception as e:
-        print(f"{site} seed okunamadı: {e}")
-        return []
+        print(f"Tarayıcı açılıyor: {seed_url}")
+        response = page.goto(seed_url, wait_until="domcontentloaded", timeout=60000)
+        status = response.status if response else "?"
+        print(f"Sayfa HTTP: {status} | URL: {page.url}")
 
-    results = []
-    seen = set()
+        # Dinamik ürün kartlarının oluşması için kısa bekleme ve birkaç scroll.
+        page.wait_for_timeout(3500)
+        for _ in range(3):
+            page.mouse.wheel(0, 2500)
+            page.wait_for_timeout(1200)
+        page.mouse.wheel(0, -8000)
+        page.wait_for_timeout(1000)
 
-    # Önce standart Product JSON-LD.
-    for p in jsonld_products(soup, r.url):
-        p["site"] = site
-        if p["url"] not in seen:
+        # Basit bot/erişim engeli tespitini logla; yine de HTML'yi denemeye devam et.
+        body_text = page.locator("body").inner_text(timeout=10000)[:4000]
+        lowered = body_text.lower()
+        if any(x in lowered for x in ["access denied", "erişim engellendi", "robot", "captcha", "verify you are human"]):
+            print("Uyarı: sayfada erişim/bot doğrulama metni görüldü.")
+
+        html = page.content()
+        soup = BeautifulSoup(html, "html.parser")
+        print(f"Tarayıcı HTML: {len(html)} karakter")
+
+        results = []
+        seen = set()
+        for a in soup.find_all("a", href=True):
+            p = card_product(site, a, page.url)
+            if not p or p["url"] in seen:
+                continue
             seen.add(p["url"])
             results.append(p)
             if len(results) >= MAX_PRODUCTS_PER_SITE:
-                return results
-
-    # Sonra ürün kartlarının görünen HTML metnini kullan.
-    for a in soup.find_all("a", href=True):
-        p = card_product(site, a, r.url)
-        if not p or p["url"] in seen:
-            continue
-        seen.add(p["url"])
-        results.append(p)
-        if len(results) >= MAX_PRODUCTS_PER_SITE:
-            break
-
-    return results
+                break
+        return results
+    except PlaywrightTimeoutError as e:
+        print(f"{site} zaman aşımı: {e}")
+        return []
+    except Exception as e:
+        print(f"{site} tarama hatası: {type(e).__name__}: {e}")
+        return []
+    finally:
+        context.close()
 
 
 def get_existing(url):
@@ -286,16 +294,28 @@ def process(product):
 
 def main():
     total = 0
-    for site, seed in SEEDS.items():
-        print(f"\n=== {site} ===")
-        products = discover(site, seed)
-        print(f"Bulunan ürün: {len(products)}")
-        for product in products:
-            try:
-                process(product)
-                total += 1
-            except Exception as e:
-                print(f"Ürün işlenemedi: {product.get('url')} -> {e}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        try:
+            for site, seed in SEEDS.items():
+                print(f"\n=== {site} ===")
+                products = discover(site, seed, browser)
+                print(f"Bulunan ürün: {len(products)}")
+                for product in products:
+                    try:
+                        process(product)
+                        total += 1
+                    except Exception as e:
+                        print(f"Ürün işlenemedi: {product.get('url')} -> {e}")
+        finally:
+            browser.close()
     print(f"\nToplam işlenen ürün: {total}")
 
 
