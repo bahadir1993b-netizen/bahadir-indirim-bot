@@ -3,43 +3,84 @@ from pathlib import Path
 p = Path("bot.py")
 s = p.read_text(encoding="utf-8")
 
-# Remove previously injected Akakce function so this patch is idempotent.
-start = s.find("\ndef akakce_check(")
-if start != -1:
-    end = s.find("\ndef process(p):", start)
-    if end == -1:
-        raise SystemExit("Akakce block end not found")
-    s = s[:start] + s[end:]
+# Replace the whole URL-discovery function. This also cleans any malformed code
+# left by older runtime patches.
+start = s.find("def extract_candidate_urls(")
+end = s.find("def parse_jsonld(", start)
+if start == -1 or end == -1:
+    raise SystemExit("extract_candidate_urls boundaries not found")
 
-# Never infer historical price from arbitrary higher numbers on a page.
-s = s.replace("""    if not previous and ps:
-        higher=[x for x in ps if x>current*1.05]
-        if higher:previous=min(higher)""", """    # Do not infer historical price from unrelated numbers on the page.""", 1)
-s = s.replace("""        higher=[x for x in ps if current and x>current*1.05];previous=min(higher) if higher else None""", """        previous=None""", 1)
+extract_func = '''def extract_candidate_urls(site, html, base):
+    html = html or ""
+    html2 = html.replace("\\\\/", "/").replace("\\\\u002F", "/").replace("\\\\u003A", ":")
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    seen = set()
 
-# Trendyol: explicitly inspect href/url/link values containing -p-NNN.
-needle = """    # Search-engine RSS is XML. Read <link> values explicitly before generic HTML parsing.
-"""
-insert = '''    if site == "Trendyol":
-        for m in re.finditer(r"(?:href|url|link)\\s*[:=]\\s*[\\\"']([^\\\"']+-p-\\d+(?:[/?#][^\\\"']*)?)", html2, re.I):
+    def add(raw, title=""):
+        raw = unwrap(raw).replace("\\\\/", "/")
+        if not raw:
+            return
+        u = canonical(urljoin(base, raw))
+        if product_url(site, u) and u not in seen:
+            seen.add(u)
+            out.append((u, (title or "Ürün").strip()[:300]))
+
+    if "<rss" in html2[:1000].lower() or "<item>" in html2.lower():
+        try:
+            xs = BeautifulSoup(html2, "xml")
+            for item in xs.find_all("item"):
+                link = item.find("link")
+                title = item.find("title")
+                if link and link.get_text(strip=True):
+                    add(link.get_text(strip=True), title.get_text(" ", strip=True) if title else "Ürün")
+        except Exception as e:
+            print(f"RSS ayrıştırma uyarısı: {e}")
+
+    for a in soup.find_all("a", href=True):
+        add(a.get("href"), a.get("title") or a.get("aria-label") or a.get_text(" ", strip=True))
+        if len(out) >= MAX_PRODUCTS_PER_SITE:
+            return out
+
+    # Trendyol embeds product links directly in page source even when productId is absent.
+    if site == "Trendyol":
+        for m in re.finditer(r'''href=["']([^"']+-p-\\d+(?:[/?#][^"']*)?)["']''', html2, re.I):
             add(m.group(1))
             if len(out) >= MAX_PRODUCTS_PER_SITE:
                 return out
-        for m in re.finditer(r"https?://(?:www\\.)?trendyol\\.com/[^\\\"'<>\\s]+-p-\\d+(?:[/?#][^\\\"'<>\\s]*)?", html2, re.I):
+        for m in re.finditer(r'''https?://(?:www\\.)?trendyol\\.com/[^"'<>\\s]+-p-\\d+(?:[/?#][^"'<>\\s]*)?''', html2, re.I):
             add(m.group(0))
             if len(out) >= MAX_PRODUCTS_PER_SITE:
                 return out
-'''
-if needle in s and 'if site == "Trendyol":\n        for m in re.finditer' not in s:
-    s = s.replace(needle, insert + needle, 1)
+        for m in re.finditer(r'''/[^"'<>\\s]+-p-\\d+(?:[/?#][^"'<>\\s]*)?''', html2, re.I):
+            add(m.group(0))
+            if len(out) >= MAX_PRODUCTS_PER_SITE:
+                return out
 
-# Replace page_product completely with a clean implementation.
-ps = s.find("\ndef page_product(")
-pe = s.find("\ndef direct_discover(", ps)
-if ps == -1 or pe == -1:
+    domain = {"Amazon": "amazon.com.tr", "Hepsiburada": "hepsiburada.com", "Trendyol": "trendyol.com"}[site]
+    patterns = [
+        rf"https?://(?:www\\.)?{re.escape(domain)}[^\"'<>\\s]+",
+        rf"(?:https?:)?//(?:www\\.)?{re.escape(domain)}[^\"'<>\\s]+",
+        rf"/[^\"'<>\\s]+-p-[A-Za-z0-9]+(?:[/?#][^\"'<>\\s]*)?",
+        r"/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}(?:[/?#][^\"'<>\\s]*)?",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, html2, re.I):
+            add(m.group(0))
+            if len(out) >= MAX_PRODUCTS_PER_SITE:
+                return out
+    return out
+
+'''
+s = s[:start] + extract_func + s[end:]
+
+# Replace page_product cleanly and remove arbitrary higher-price inference.
+start = s.find("def page_product(")
+end = s.find("def direct_discover(", start)
+if start == -1 or end == -1:
     raise SystemExit("page_product boundaries not found")
-page_func = '''
-def page_product(site,url,title,browser):
+
+page_func = '''def page_product(site, url, title, browser):
     ctx = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width":1440,"height":1000}, extra_http_headers=HEADERS)
     page = ctx.new_page()
     try:
@@ -48,7 +89,7 @@ def page_product(site,url,title,browser):
         if not r or r.status >= 400:
             print(f"{site} ürün HTTP: {r.status if r else 0} | {url}")
             return None
-        page.wait_for_timeout(1800)
+        page.wait_for_timeout(1500)
         html = page.content()
         text = page.locator("body").inner_text(timeout=10000)
         jd = parse_jsonld(html)
@@ -56,96 +97,53 @@ def page_product(site,url,title,browser):
         if current is None:
             for sel in ['meta[itemprop="price"]', 'meta[property="product:price:amount"]', 'meta[name="price"]']:
                 try:
-                    v = page.locator(sel).first.get_attribute("content")
-                    current = price(v)
+                    current = price(page.locator(sel).first.get_attribute("content"))
                     if current:
                         break
                 except Exception:
                     pass
         if current is None and site == "Amazon":
-            for pat in [r'"priceAmount"\s*:\s*"?([0-9.,]+)', r'"price"\s*:\s*"?([0-9.,]+)', r'"displayPrice"\s*:\s*"[^0-9]*([0-9.,]+)']:
+            for pat in [r'"priceAmount"\\s*:\\s*"?([0-9.,]+)', r'"displayPrice"\\s*:\\s*"[^0-9]*([0-9.,]+)']:
                 m = re.search(pat, html, re.I)
                 if m:
                     current = price(m.group(1))
                     if current:
                         break
-        psx = prices(text)
-        if current is None and psx:
-            current = psx[0]
-        previous = None
-        return make_product(site, jd.get("name") or title, url, text, current, previous) or make_product(site, title, url, text, current, previous)
+        ps = prices(text)
+        if current is None and ps:
+            current = ps[0]
+        return make_product(site, jd.get("name") or title, url, text, current, None) or make_product(site, title, url, text, current, None)
     except Exception as e:
         print(f"{site} ürün sayfası hata: {type(e).__name__}: {e}")
         return None
     finally:
         ctx.close()
+
 '''
-s = s[:ps] + page_func + s[pe:]
+s = s[:start] + page_func + s[end:]
 
-# Akakce is a current-market reference, not historical price.
-ak = '''
-def akakce_check(name,current,browser):
-    try:
-        q = re.sub(r"[^0-9A-Za-zÇĞİÖŞÜçğıöşü+ -]", " ", name or "").strip()
-        q = re.sub(r"\\s+", " ", q)[:180]
-        if not q:
-            return None
-        ctx = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width":1440,"height":1000}, extra_http_headers=HEADERS)
-        page = ctx.new_page()
-        try:
-            u = "https://www.akakce.com/arama/?q=" + quote(q, safe="")
-            r = page.goto(u, wait_until="domcontentloaded", timeout=30000)
-            if not r or r.status >= 400:
-                return None
-            page.wait_for_timeout(1200)
-            candidates = []
-            for a in page.locator("a[href]").all():
-                try:
-                    h = a.get_attribute("href") or ""
-                    t = (a.inner_text() or "").strip()
-                    if re.search(r",\\d+\\.html(?:$|[?#])", h) and t:
-                        candidates.append((h, t))
-                except Exception:
-                    pass
-            if not candidates:
-                return None
-            h, t = candidates[0]
-            if not h.startswith("http"):
-                h = urljoin("https://www.akakce.com", h)
-            r = page.goto(h, wait_until="domcontentloaded", timeout=30000)
-            if not r or r.status >= 400:
-                return None
-            page.wait_for_timeout(1000)
-            text = re.sub(r"\\s+", " ", page.locator("body").inner_text(timeout=10000) or "")
-            vals = [x for x in prices(text) if x > 50]
-            if not vals:
-                return None
-            low = min(vals)
-            print(f"Akakce: {t[:80]} | en düşük={low:.2f} TL | bot={float(current):.2f} TL")
-            return {"url": canonical(h), "low": low, "name": t[:300]}
-        finally:
-            ctx.close()
-    except Exception as e:
-        print(f"Akakce hata: {type(e).__name__}: {e}")
-        return None
-'''
-proc = s.find("\ndef process(p):")
-if proc == -1:
-    raise SystemExit("process function not found")
-s = s[:proc] + ak + s[proc:]
+# Remove Akakce runtime injection entirely for now. It was making every product
+# perform an additional network search and could make a run take several minutes.
+start = s.find("def akakce_check(")
+if start != -1:
+    end = s.find("def process(p):", start)
+    if end == -1:
+        raise SystemExit("Akakce/process boundary not found")
+    s = s[:start] + s[end:]
 
-marker = """    if len(hp)>=MIN_HISTORY_SAMPLES:
-        hm=median(hp)
-        if hm and hm>current:baseline=max(baseline or 0,hm)
-"""
-addition = marker + """    ak=akakce_check(p.get("name"),current,process.browser)
-    if ak and ak.get("low") and ak["low"]>current:
-        baseline=max(baseline or 0,float(ak["low"]))
-"""
-if marker in s and "ak=akakce_check(p.get(\"name\")" not in s:
-    s = s.replace(marker, addition, 1)
+# Ensure process does not call Akakce.
+marker = '    ak=akakce_check(p.get("name"),current,process.browser)\n'
+if marker in s:
+    line_end = s.find('\n', s.find(marker))
+    next_line_end = s.find('\n', line_end + 1)
+    s = s[:s.find(marker)] + s[next_line_end + 1:]
 
-s = s.replace("""browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);total=0""", """browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);process.browser=browser;total=0""", 1)
+# Give process access to the browser only if needed later.
+s = s.replace(
+    'browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);total=0',
+    'browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);total=0',
+    1,
+)
 
 p.write_text(s, encoding="utf-8")
-print("runtime patch applied: safe robust product extraction")
+print("runtime patch applied: clean discovery; slow Akakce disabled")
