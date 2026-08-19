@@ -34,8 +34,11 @@ jobs:
         timeout-minutes: 4
         run: python -m playwright install chromium
 
-      - name: Indirim esigini %25 yap
-        run: sed -i 's/MIN_DISCOUNT = 30.0/MIN_DISCOUNT = 25.0/' bot.py
+      - name: Bot kodunu geri yükle ve %25 esik yap
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/bahadir1993b-netizen/bahadir-indirim-bot/c93b571f567826b788bc3ddaa7315d68bf00b9db/bot.py -o bot.py
+          sed -i 's/MIN_DISCOUNT = 30.0/MIN_DISCOUNT = 25.0/' bot.py
+          grep 'MIN_DISCOUNT' bot.py
 
       - name: Supabase bağlantı testi
         env:
