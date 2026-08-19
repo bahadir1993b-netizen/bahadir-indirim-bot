@@ -1,7 +1,7 @@
 import os
 import re
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -33,16 +33,26 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
-def supabase_headers():
-    return {
+def supabase_headers(prefer=None):
+    # Supabase yeni "sb_secret_..." anahtarlarında Authorization: Bearer kullanmak
+    # 401 üretebilir. Eski service_role JWT anahtarlarında ise Bearer gereklidir.
+    headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
+    if SUPABASE_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
 
 
 def supabase_get(query):
-    r = session.get(f"{SUPABASE_URL}/rest/v1/{query}", headers=supabase_headers(), timeout=20)
+    r = session.get(
+        f"{SUPABASE_URL}/rest/v1/{query}",
+        headers=supabase_headers(),
+        timeout=20,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -50,7 +60,7 @@ def supabase_get(query):
 def supabase_upsert(product):
     r = session.post(
         f"{SUPABASE_URL}/rest/v1/products?on_conflict=product_url",
-        headers={**supabase_headers(), "Prefer": "resolution=merge-duplicates,return=representation"},
+        headers=supabase_headers("resolution=merge-duplicates,return=representation"),
         json=product,
         timeout=20,
     )
@@ -86,6 +96,12 @@ def prices_from_text(text):
     return vals
 
 
+def canonical_url(href):
+    parsed = urlparse(href)
+    # Takip/reklam parametrelerini kaldır: aynı ürün her taramada aynı kayda yazılsın.
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+
+
 def likely_product_url(site, path):
     p = path.lower()
     if site == "Amazon":
@@ -101,7 +117,7 @@ def likely_product_url(site, path):
 
 
 def card_product(site, a, base_url):
-    href = urljoin(base_url, a.get("href", ""))
+    href = canonical_url(urljoin(base_url, a.get("href", "")))
     parsed = urlparse(href)
     if not likely_product_url(site, parsed.path):
         return None
@@ -159,7 +175,6 @@ def discover(site, seed_url, browser):
         status = response.status if response else "?"
         print(f"Sayfa HTTP: {status} | URL: {page.url}")
 
-        # Dinamik ürün kartlarının oluşması için kısa bekleme ve birkaç scroll.
         page.wait_for_timeout(3500)
         for _ in range(3):
             page.mouse.wheel(0, 2500)
@@ -167,7 +182,6 @@ def discover(site, seed_url, browser):
         page.mouse.wheel(0, -8000)
         page.wait_for_timeout(1000)
 
-        # Basit bot/erişim engeli tespitini logla; yine de HTML'yi denemeye devam et.
         body_text = page.locator("body").inner_text(timeout=10000)[:4000]
         lowered = body_text.lower()
         if any(x in lowered for x in ["access denied", "erişim engellendi", "robot", "captcha", "verify you are human"]):
