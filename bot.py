@@ -9,14 +9,13 @@ TOKEN=os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID="-1004424116637"
 SUPABASE_URL=os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY=os.environ["SUPABASE_SERVICE_KEY"]
-HEADERS={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36","Accept-Language":"tr-TR,tr;q=0.9,en;q=0.8"}
+HEADERS={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36","Accept-Language":"tr-TR,tr;q=0.9,en;q=0.8","Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
 SEEDS={"Amazon":"https://www.amazon.com.tr/gp/goldbox","Hepsiburada":"https://www.hepsiburada.com/ara?q=indirim","Trendyol":"https://www.trendyol.com/sr?q=indirim"}
 MIN_DISCOUNT=10.0
 REPOST_COOLDOWN_HOURS=12
 MAX_PRODUCTS_PER_SITE=12
 PRICE_HISTORY_DAYS=30
 MIN_HISTORY_SAMPLES=3
-
 
 def sb_headers(prefer=None):
     h={"apikey":SUPABASE_KEY,"Content-Type":"application/json","Accept":"application/json"}
@@ -25,17 +24,45 @@ def sb_headers(prefer=None):
     return h
 
 def sb_get(path,params=None):
-    r=requests.get(f"{SUPABASE_URL}/rest/v1/{path}",headers=sb_headers(),params=params,timeout=20); r.raise_for_status(); return r.json()
+    r=requests.get(f"{SUPABASE_URL}/rest/v1/{path}",headers=sb_headers(),params=params,timeout=20)
+    if r.status_code>=400: raise requests.HTTPError(f"{r.status_code} {r.text[:500]}",response=r)
+    return r.json()
 
 def sb_upsert(p):
-    r=requests.post(f"{SUPABASE_URL}/rest/v1/products?on_conflict=product_url",headers=sb_headers("resolution=merge-duplicates,return=representation"),json=p,timeout=20); r.raise_for_status(); d=r.json(); return d[0] if d else p
+    # Bazı eski products tablolarında sonradan eklenen kampanya kolonları olmayabilir.
+    # Önce tam kaydı, 400 olursa çekirdek kolonlarla tekrar deniyoruz.
+    variants=[p]
+    core={k:p[k] for k in ("name","price","previous_display_price","url","site") if k in p}
+    if core!=p: variants.append(core)
+    slim={k:p[k] for k in ("name","price","url","site") if k in p}
+    if slim!=core: variants.append(slim)
+    last_error=None
+    for i,payload in enumerate(variants,1):
+        r=requests.post(f"{SUPABASE_URL}/rest/v1/products?on_conflict=product_url",headers=sb_headers("resolution=merge-duplicates,return=representation"),json=payload,timeout=20)
+        if r.ok:
+            d=r.json(); return d[0] if d else payload
+        last_error=f"HTTP {r.status_code}: {r.text[:500]}"
+        print(f"Supabase products deneme {i} başarısız: {last_error}")
+    raise requests.HTTPError(last_error or "Supabase products upsert failed")
 
 def record_price(url,site,value,at):
-    r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json={"product_url":url,"site":site,"price":value,"recorded_at":at},timeout=20); r.raise_for_status()
+    payload={"product_url":url,"site":site,"price":value}
+    # Repo SQL'indeki kolon observed_at; eski tabloda recorded_at kullanılmış olabilir.
+    for time_key in ("observed_at","recorded_at"):
+        q=dict(payload); q[time_key]=at
+        r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json=q,timeout=20)
+        if r.ok:return
+        print(f"Supabase price_history {time_key}: HTTP {r.status_code} | {r.text[:300]}")
+    raise requests.HTTPError("price_history insert failed")
 
 def history(url):
     cutoff=(datetime.now(timezone.utc)-timedelta(days=PRICE_HISTORY_DAYS)).isoformat()
-    return sb_get("price_history",{"select":"price,recorded_at","product_url":f"eq.{url}","recorded_at":f"gte.{cutoff}","order":"recorded_at.desc"})
+    for time_key in ("observed_at","recorded_at"):
+        try:
+            return sb_get("price_history",{"select":f"price,{time_key}","product_url":f"eq.{url}",time_key:f"gte.{cutoff}","order":f"{time_key}.desc"})
+        except requests.HTTPError as e:
+            print(f"Supabase history {time_key} kullanılamadı: {e}")
+    return []
 
 def price(v):
     if v is None:return None
@@ -54,6 +81,8 @@ PRICE_RE=re.compile(r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:
 def prices(text):
     out=[]
     for m in PRICE_RE.finditer(text or ""):
+        # %8 gibi oranları fiyat sanma
+        if "%" in (text[max(0,m.start()-3):m.start()]): continue
         p=price(m.group(1))
         if p and p>0:out.append(p)
     return out
@@ -67,37 +96,45 @@ def labeled(text,labels):
     return None
 
 def canonical(url):
-    url=unquote(url or "").replace("\\/","/"); p=urlparse(url)
+    url=unquote(url or "").replace("\\/","/").strip().strip('"\'')
+    p=urlparse(url)
     return urlunparse((p.scheme or "https",p.netloc.lower(),p.path.rstrip("/"),"","",""))
 
 def product_url(site,url):
-    u=unquote(url or "").replace("\\/","/"); p=urlparse(u).path.lower() if "://" in u else u.lower()
-    if site=="Amazon":return bool(re.search(r"/(?:dp|gp/product|gp/aw/d|product)/[a-z0-9]{8,}",p,re.I))
+    u=unquote(url or "").replace("\\/","/")
+    p=urlparse(u).path.lower() if "://" in u else u.lower()
+    if site=="Amazon":return bool(re.search(r"/(?:dp|gp/product|gp/aw/d|product)/[a-z0-9]{8,}(?:$|[/?#])",p,re.I))
     if site=="Hepsiburada":return bool(re.search(r"-p-[a-z0-9]+(?:$|[/?#])",p,re.I))
     if site=="Trendyol":return bool(re.search(r"-p-\d+(?:$|[/?#])",p,re.I))
     return False
 
 def unwrap(url):
-    url=unquote(url or "").replace("\\/","/"); q=parse_qs(urlparse(url).query)
+    url=unquote(url or "").replace("\\/","/")
+    q=parse_qs(urlparse(url).query)
     for k in ("q","url","uddg","u"):
         if q.get(k) and q[k][0].startswith("http"):return unquote(q[k][0])
     return url
 
 def extract_candidate_urls(site,html,base):
-    html=html or ""; soup=BeautifulSoup(html,"html.parser"); out=[]; seen=set()
+    html=html or ""; html2=html.replace("\\/","/").replace("\\u002F","/").replace("\\u003A",":"); soup=BeautifulSoup(html,"html.parser"); out=[]; seen=set()
     def add(raw,title=""):
-        raw=unwrap(raw)
+        raw=unwrap(raw).replace("\\/","/")
         if not raw:return
         u=canonical(urljoin(base,raw))
         if product_url(site,u) and u not in seen:
             seen.add(u); out.append((u,(title or "Ürün").strip()[:300]))
     for a in soup.find_all("a",href=True):
-        add(a.get("href"),a.get("title") or a.get_text(" ",strip=True))
+        add(a.get("href"),a.get("title") or a.get("aria-label") or a.get_text(" ",strip=True))
         if len(out)>=MAX_PRODUCTS_PER_SITE:return out
     domain={"Amazon":"amazon.com.tr","Hepsiburada":"hepsiburada.com","Trendyol":"trendyol.com"}[site]
-    patterns=[rf"https?://(?:www\.)?{re.escape(domain)}[^\"'<>\\ ]+",rf"/(?:[^\"'<> ]+)-p-[A-Za-z0-9]+(?:[/?#][^\"'<> ]*)?",r"/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}(?:[/?#][^\"'<> ]*)?"]
+    patterns=[
+        rf"https?://(?:www\.)?{re.escape(domain)}[^\"'<>\\s]+",
+        rf"(?:https?:)?//(?:www\.)?{re.escape(domain)}[^\"'<>\\s]+",
+        rf"/(?:[^\"'<>\\s]+)-p-[A-Za-z0-9]+(?:[/?#][^\"'<>\\s]*)?",
+        r"/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}(?:[/?#][^\"'<>\\s]*)?"
+    ]
     for pat in patterns:
-        for m in re.finditer(pat,html,re.I):
+        for m in re.finditer(pat,html2,re.I):
             add(m.group(0))
             if len(out)>=MAX_PRODUCTS_PER_SITE:return out
     return out
@@ -202,7 +239,15 @@ def process(p):
         if hm and hm>current:baseline=max(baseline or 0,hm)
     discount=((baseline-current)/baseline*100) if baseline and baseline>current else 0
     print(f"DEĞERLENDİR: {p['site']} | {current:.2f} TL | baz={baseline} | indirim=%{discount:.1f}")
-    row=dict(p); row.update({"price":current,"discount_percent":round(discount,2),"last_seen_at":now.isoformat()}); saved=sb_upsert(row); record_price(url,p["site"],current,now.isoformat())
+    row=dict(p); row.update({"price":current,"discount_percent":round(discount,2),"last_seen_at":now.isoformat()})
+    try:
+        saved=sb_upsert(row)
+    except Exception as e:
+        # Veritabanı hatası Telegram bildirimini engellemesin; hata logda görünür.
+        print(f"Supabase products son hata: {type(e).__name__}: {e}")
+        saved=p
+    try:record_price(url,p["site"],current,now.isoformat())
+    except Exception as e:print(f"Supabase price_history son hata: {type(e).__name__}: {e}")
     if discount<MIN_DISCOUNT:return False
     last=saved.get("last_posted_at")
     if last:
@@ -211,24 +256,28 @@ def process(p):
         except:pass
     msg=f"🔥 %{discount:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {current:,.2f} TL\n🏷️ Önce: {baseline:,.2f} TL\n🛍️ {p['site']}\n🔗 {url}"
     if p.get("campaign_price"):msg+=f"\n🛒 Sepette: {p['campaign_price']:,.2f} TL"
-    if p.get("coupon_code"):msg+=f"\n🎟️ Kod: {p['coupon_code']}"
-    telegram(msg); sb_upsert({"product_url":url,"last_posted_at":now.isoformat()}); return True
+    if p.get("coupon_code"):msg+=f"\n🎟️ Kupon: {p['coupon_code']}"
+    telegram(msg)
+    return True
+
+def telegram_check():
+    r=requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe",timeout=20); print(f"Telegram getMe: {r.status_code} | {r.text[:250]}"); r.raise_for_status()
 
 def main():
     print("=== İndirim botu başladı ===")
-    try:
-        r=requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe",timeout=15);print(f"Telegram getMe: {r.status_code} | {r.text[:180]}")
-    except Exception as e:print(f"Telegram bağlantı hata: {type(e).__name__}: {e}")
-    sent=0
+    telegram_check()
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"])
-        try:
-            for site,seed in SEEDS.items():
-                for p in discover(site,seed,browser):
+        total=0
+        for site,seed in SEEDS.items():
+            try:
+                products=discover(site,seed,browser)
+                for p in products:
                     try:
-                        if process(p):sent+=1
+                        if process(p):total+=1
                     except Exception as e:print(f"{site} işleme hata: {type(e).__name__}: {e}")
-        finally:browser.close()
-    print(f"=== Bitti. Gönderilen: {sent} ===")
+            except Exception as e:print(f"{site} genel hata: {type(e).__name__}: {e}")
+        browser.close()
+    print(f"=== Bitti. Gönderilen: {total} ===")
 
 if __name__=="__main__":main()
