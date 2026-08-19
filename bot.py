@@ -2,7 +2,7 @@ import os
 import re
 import json
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin, urlparse, urlunparse, quote
+from urllib.parse import urljoin, urlparse, urlunparse, quote, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,7 +26,6 @@ SEEDS = {
     "Pazarama": "https://www.pazarama.com/son-30-gunun-en-dusuk-fiyatli-urunleri-k-VRTCTGRY",
 }
 
-# Test icin %10. Gercek fiyat gecmisi Supabase'den olusur; site uzerindeki eski fiyat guvenilmezse kullanilmaz.
 MIN_DISCOUNT = 10.0
 REPOST_COOLDOWN_HOURS = 12
 MAX_PRODUCTS_PER_SITE = 12
@@ -38,7 +37,7 @@ session.headers.update(HEADERS)
 
 
 def supabase_headers(prefer=None):
-    h = {"apikey": SUPABASE_KEY, "Content-Type": "application/json", "User-Agent": "bahadir-indirim-bot/1.1", "Accept": "application/json"}
+    h = {"apikey": SUPABASE_KEY, "Content-Type": "application/json", "User-Agent": "bahadir-indirim-bot/1.2", "Accept": "application/json"}
     if SUPABASE_KEY.startswith("eyJ"):
         h["Authorization"] = f"Bearer {SUPABASE_KEY}"
     if prefer:
@@ -91,10 +90,12 @@ def clean_price(value):
         return None
 
 
+PRICE_RE = re.compile(r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", re.I)
+
+
 def prices_from_text(text):
     vals = []
-    pattern = r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)"
-    for m in re.finditer(pattern, text, re.I):
+    for m in PRICE_RE.finditer(text or ""):
         p = clean_price(m.group(1))
         if p and p > 0:
             vals.append(p)
@@ -102,8 +103,9 @@ def prices_from_text(text):
 
 
 def labeled_price(text, labels):
+    text = text or ""
     for label in labels:
-        m = re.search(re.escape(label) + r"[^0-9]{0,70}(?:₺\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
+        m = re.search(re.escape(label) + r"[^0-9]{0,80}(?:₺\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
         if m:
             p = clean_price(m.group(1))
             if p and p > 0:
@@ -115,24 +117,22 @@ def hepsiburada_prices(text):
     current = labeled_price(text, ["Sepetteki Fiyat", "Sepette indirimli fiyat", "Sepette", "Peşin Fiyat", "Güncel Fiyat", "Satış Fiyatı", "Kampanyalı Fiyat"])
     if current is None:
         candidates = []
-        pattern = r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)"
         negative = ["taksit", "puan", "worldpuan", "parapuan", "bonus", "parafpara", "chip-para", "kupon kazan", "kupon tutarı", "indirim tutarı", "kazanç"]
-        for m in re.finditer(pattern, text, re.I):
+        for m in PRICE_RE.finditer(text or ""):
             p = clean_price(m.group(1))
             if not p or p <= 0:
                 continue
-            ctx = text[max(0, m.start(1)-160):min(len(text), m.end()+100)].lower()
+            ctx = (text[max(0, m.start()-180):min(len(text), m.end()+100)]).lower()
             score = 0
-            if any(x in ctx for x in negative): score -= 30
-            if any(x in ctx for x in ["fiyat", "satış", "sepette", "hemen al"]): score += 12
-            if p < 50: score -= 12
-            elif p < 100: score -= 4
+            if any(x in ctx for x in negative): score -= 40
+            if any(x in ctx for x in ["fiyat", "satış", "sepette", "hemen al"]): score += 15
+            if p < 50: score -= 10
             candidates.append((score, p))
         if candidates:
-            candidates.sort(reverse=True)
+            candidates.sort(key=lambda x: (x[0], -x[1]), reverse=True)
             current = candidates[0][1]
     previous = None
-    for label in ["Eski Fiyat", "Önceki Fiyat"]:
+    for label in ["Eski Fiyat", "Önceki Fiyat", "Liste Fiyatı"]:
         p = labeled_price(text, [label])
         if p and current and p > current:
             previous = p
@@ -182,8 +182,8 @@ def canonical_url(href):
 
 
 def likely_product_url(site, path):
-    p = path.lower()
-    if site == "Amazon": return "/dp/" in p or "/gp/product/" in p
+    p = (path or "").lower()
+    if site == "Amazon": return "/dp/" in p or "/gp/product/" in p or "/gp/aw/d/" in p
     if site == "Hepsiburada": return "-p-" in p
     if site == "Trendyol": return "-p-" in p and len(p.strip("/")) > 10
     if site == "Pazarama": return bool(re.search(r"-p-\d+", p))
@@ -194,173 +194,209 @@ def make_product(site, name, url, text, current=None, previous=None):
     url = canonical_url(url)
     if not likely_product_url(site, urlparse(url).path):
         return None
+    text = text or ""
     if current is None:
         if site == "Hepsiburada":
             current, previous = hepsiburada_prices(text)
-        elif site == "Pazarama":
-            # Pazarama kartlarinda "Sepette" sonrasi fiyat gercek odeme fiyatidir.
-            current = labeled_price(text, ["Sepette", "Plus ile"]) or (prices_from_text(text)[-1] if prices_from_text(text) else None)
         else:
-            current = labeled_price(text, ["Fırsatın Fiyatı", "Teklif Fiyatı", "Sepette", "İndirimli Fiyat"]) or (prices_from_text(text)[0] if prices_from_text(text) else None)
+            current = labeled_price(text, ["Fırsatın Fiyatı", "Teklif Fiyatı", "Sepette", "İndirimli Fiyat", "Güncel Fiyat"]) or ((prices_from_text(text)[0]) if prices_from_text(text) else None)
     if current is None or current <= 0:
         return None
     campaign = extract_campaign(text, current)
     return {"name": re.sub(r"\s+", " ", str(name)).strip()[:300], "price": current, "previous_display_price": previous if previous and previous > current else None, "campaign_price": campaign["campaign_price"], "coupon_code": campaign["coupon_code"], "campaign_note": campaign["campaign_note"], "url": url, "site": site}
 
 
+def amazon_card(a, base_url):
+    href = canonical_url(urljoin(base_url, a.get("href", "")))
+    if not likely_product_url("Amazon", urlparse(href).path):
+        return None
+    node = a
+    best = ""
+    name = a.get("title") or a.get_text(" ", strip=True)
+    for _ in range(5):
+        if not node:
+            break
+        txt = node.get_text(" ", strip=True)
+        if len(txt) > len(best) and len(txt) < 1800:
+            best = txt
+        for img in node.find_all("img"):
+            alt = img.get("alt")
+            if alt and len(alt) > len(name or ""):
+                name = alt
+        node = node.parent
+    if not name or len(name) < 5:
+        name = best[:300]
+    prices = prices_from_text(best)
+    current = labeled_price(best, ["Fırsatın Fiyatı", "Teklif Fiyatı", "Deal Price", "İndirimli Fiyat", "Şimdi")
+    if current is None and prices:
+        current = prices[0]
+    previous = max(prices[1:]) if len(prices) > 1 else None
+    return make_product("Amazon", name, href, best, current, previous)
+
+
 def card_product(site, a, base_url):
+    if site == "Amazon":
+        return amazon_card(a, base_url)
     href = canonical_url(urljoin(base_url, a.get("href", "")))
     if not likely_product_url(site, urlparse(href).path):
         return None
     text = a.get_text(" ", strip=True)
-    if len(text) < 5:
-        return None
-    # Urun kartinda kal: fazla parent'a cikmak farkli kartlarin fiyatlarini birlestiriyordu.
-    if site == "Pazarama":
-        current = labeled_price(text, ["Sepette", "Plus ile"])
-        prices = prices_from_text(text)
-        if current is None and prices:
-            current = prices[-1]
-        return make_product(site, text.split(" Sepette")[0][:300], href, text, current=current)
     node, best = a, text
-    for _ in range(2):
+    for _ in range(3):
         node = node.parent
         if not node: break
         t = node.get_text(" ", strip=True)
-        if len(t) > len(best) and len(t) < 900:
+        if len(t) > len(best) and len(t) < 1200:
             best = t
-    if site == "Amazon":
-        current = labeled_price(best, ["Fırsatın Fiyatı", "Teklif Fiyatı"]) or (prices_from_text(best)[0] if prices_from_text(best) else None)
-    elif site == "Hepsiburada":
+    if site == "Pazarama":
+        current = labeled_price(best, ["Sepette", "Plus ile"]) or ((prices_from_text(best)[-1]) if prices_from_text(best) else None)
+        name = text.split(" Sepette")[0][:300] or best[:300]
+        return make_product(site, name, href, best, current)
+    if site == "Hepsiburada":
         current, previous = hepsiburada_prices(best)
-        return make_product(site, text[:300], href, best, current, previous)
-    else:
-        current = labeled_price(best, ["Sepette", "İndirimli Fiyat"]) or (prices_from_text(best)[0] if prices_from_text(best) else None)
-    return make_product(site, text[:300], href, best, current)
+        return make_product(site, text[:300] or best[:300], href, best, current, previous)
+    current = labeled_price(best, ["Sepette", "İndirimli Fiyat"]) or ((prices_from_text(best)[0]) if prices_from_text(best) else None)
+    return make_product(site, text[:300] or best[:300], href, best, current)
 
 
-def jina_read(url, timeout=45):
-    reader_url = "https://r.jina.ai/" + url
-    r = requests.get(reader_url, headers={"User-Agent": HEADERS["User-Agent"], "X-Respond-With": "markdown", "X-Timeout": "20"}, timeout=timeout)
-    r.raise_for_status()
-    return r.text
-
-
-def discover_with_jina(site, url, limit=MAX_PRODUCTS_PER_SITE):
+def google_discovery(site, browser, limit=MAX_PRODUCTS_PER_SITE):
+    domains = {"Amazon": "amazon.com.tr", "Hepsiburada": "hepsiburada.com", "Trendyol": "trendyol.com"}
+    domain = domains[site]
+    queries = [f"site:{domain} indirim TL", f"site:{domain} fırsat TL"]
+    out, seen = [], set()
+    context = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1000})
+    page = context.new_page()
     try:
-        text = jina_read(url)
-        print(f"{site} Jina fallback: {len(text)} karakter")
-        out, seen = [], set()
-        # Markdown link satirlarinda urun adi + fiyat genellikle birlikte bulunur.
-        link_re = re.compile(r"\[([^\]]{4,500})\]\((https?://[^)]+)\)")
-        for m in link_re.finditer(text):
-            name, href = m.group(1), m.group(2)
-            href = href.replace("\\)", ")")
-            if not likely_product_url(site, urlparse(href).path):
-                continue
-            if href in seen:
-                continue
-            start, end = max(0, m.start()-250), min(len(text), m.end()+500)
-            context = re.sub(r"\s+", " ", text[start:end])
-            prices = prices_from_text(context)
-            current = None
-            if site == "Hepsiburada":
-                current, previous = hepsiburada_prices(context)
-            elif site == "Pazarama":
-                current = labeled_price(context, ["Sepette", "Plus ile"]) or (prices[-1] if prices else None)
-                previous = None
-            else:
-                current = labeled_price(context, ["Sepette", "Fırsatın Fiyatı", "İndirimli Fiyat"]) or (prices[-1] if prices else None)
-                previous = max(prices[:-1]) if len(prices) > 1 else None
-            p = make_product(site, name, href, context, current, previous)
-            if not p:
-                continue
-            out.append(p); seen.add(href)
-            if len(out) >= limit:
-                break
-        print(f"{site} Jina: {len(out)} ürün bulundu")
-        return out
-    except Exception as e:
-        print(f"{site} Jina uyarısı: {type(e).__name__}: {e}")
-        return []
-
-
-def resolve_host_ip(host):
-    # GitHub runner bazen public.trendyol.com DNS'ini cozemiyor. Google DNS HTTPS ile IP al.
-    try:
-        r = requests.get("https://dns.google/resolve", params={"name": host, "type": "A"}, timeout=10)
-        r.raise_for_status()
-        for item in r.json().get("Answer", []):
-            if item.get("type") == 1 and item.get("data"):
-                return item["data"]
-    except Exception as e:
-        print(f"DNS fallback uyarısı ({host}): {e}")
-    return None
+        for q in queries:
+            url = "https://www.google.com/search?" + quote("q=" + q + "&hl=tr&gl=tr&num=20", safe="=&")
+            try:
+                response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                if not response or response.status >= 400:
+                    continue
+                page.wait_for_timeout(1200)
+                soup = BeautifulSoup(page.content(), "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a.get("href", "")
+                    if href.startswith("/url?"):
+                        qs = parse_qs(urlparse(href).query)
+                        href = qs.get("q", qs.get("url", [""]))[0] if qs.get("q", qs.get("url")) else ""
+                    if not href.startswith("http"):
+                        continue
+                    pth = urlparse(href).path
+                    if domain not in urlparse(href).netloc or not likely_product_url(site, pth):
+                        continue
+                    if href in seen:
+                        continue
+                    text = a.get_text(" ", strip=True)
+                    node = a
+                    best = text
+                    for _ in range(3):
+                        node = node.parent
+                        if not node: break
+                        t = node.get_text(" ", strip=True)
+                        if len(t) > len(best) and len(t) < 1500:
+                            best = t
+                    prices = prices_from_text(best)
+                    if not prices:
+                        continue
+                    if site == "Hepsiburada":
+                        current, previous = hepsiburada_prices(best)
+                    else:
+                        current = prices[-1]
+                        previous = max(prices[:-1]) if len(prices) > 1 else None
+                    product = make_product(site, text or best[:300], href, best, current, previous)
+                    if product:
+                        out.append(product); seen.add(product["url"])
+                        if len(out) >= limit:
+                            break
+                if len(out) >= limit:
+                    break
+            except Exception as e:
+                print(f"{site} Google fallback uyarısı: {type(e).__name__}: {e}")
+    finally:
+        context.close()
+    print(f"{site} Google fallback: {len(out)} ürün bulundu")
+    return out
 
 
 def trendyol_public_products(limit=MAX_PRODUCTS_PER_SITE):
     endpoint = "https://public.trendyol.com/discovery-web-searchgw-service/v2/api/infinite-scroll/sr"
-    params = {"q": "indirim", "os": "1", "sk": "1", "pi": "1", "culture": "tr-TR", "userGenderId": "1", "pId": "0", "scoringAlgorithmId": "2", "categoryRelevancyEnabled": "false", "isLegalRequirementConfirmed": "false", "searchStrategyType": "DEFAULT", "productStampType": "TypeA", "fixSlotProductAdsIncluded": "true", "searchAbDecider": ",Suggestion_A,Relevancy_1,FilterRelevancy_1,Smartlisting_2,FlashSales_1,SuggestionBadges_A"}
+    params = {"q":"indirim","os":"1","sk":"1","pi":"1","culture":"tr-TR","userGenderId":"1","pId":"0","scoringAlgorithmId":"2","categoryRelevancyEnabled":"false","isLegalRequirementConfirmed":"false","searchStrategyType":"DEFAULT","productStampType":"TypeA","fixSlotProductAdsIncluded":"true","searchAbDecider":",Suggestion_A,Relevancy_1,FilterRelevancy_1,Smartlisting_2,FlashSales_1,SuggestionBadges_A"}
     try:
         r = session.get(endpoint, params=params, timeout=25)
         r.raise_for_status()
         products = (r.json().get("result") or {}).get("products") or []
-    except Exception as first_error:
-        print(f"Trendyol public servis ilk deneme: {type(first_error).__name__}: {first_error}")
-        ip = resolve_host_ip("public.trendyol.com")
-        if not ip:
-            return discover_with_jina("Trendyol", SEEDS["Trendyol"], limit)
-        try:
-            path = "/discovery-web-searchgw-service/v2/api/infinite-scroll/sr"
-            r = requests.get(f"https://{ip}{path}", params=params, headers={**HEADERS, "Host": "public.trendyol.com"}, verify=False, timeout=25)
-            r.raise_for_status()
-            products = (r.json().get("result") or {}).get("products") or []
-            print(f"Trendyol public servis DNS-IP fallback başarılı: {ip}")
-        except Exception as second_error:
-            print(f"Trendyol public servis IP fallback: {type(second_error).__name__}: {second_error}")
-            return discover_with_jina("Trendyol", SEEDS["Trendyol"], limit)
+    except Exception as e:
+        print(f"Trendyol public servis başarısız: {type(e).__name__}: {e}")
+        return []
     out, seen = [], set()
     for item in products:
         url = item.get("url") or item.get("productUrl")
-        if not url:
-            cid = item.get("id") or item.get("contentId")
-            if cid: url = f"https://www.trendyol.com/urun-p-{cid}"
+        cid = item.get("id") or item.get("contentId")
+        if not url and cid:
+            url = f"https://www.trendyol.com/urun-p-{cid}"
         current = clean_price(item.get("price") or item.get("discountedPrice") or item.get("sellingPrice") or item.get("priceWithDiscount"))
+        previous = clean_price(item.get("originalPrice") or item.get("listPrice") or item.get("struckPrice"))
         if not url or not current:
             continue
-        previous = clean_price(item.get("originalPrice") or item.get("listPrice") or item.get("struckPrice"))
-        ctext = json.dumps(item, ensure_ascii=False)
-        p = make_product("Trendyol", item.get("name") or item.get("title") or "Trendyol ürünü", url, ctext, current, previous)
+        p = make_product("Trendyol", item.get("name") or item.get("title") or "Trendyol ürünü", url, json.dumps(item, ensure_ascii=False), current, previous)
         if p and p["url"] not in seen:
             out.append(p); seen.add(p["url"])
             if len(out) >= limit: break
     print(f"Trendyol public servis: {len(out)} ürün bulundu")
-    return out if out else discover_with_jina("Trendyol", SEEDS["Trendyol"], limit)
+    return out
 
 
 def discover(site, seed_url, browser):
     if site == "Trendyol":
-        return trendyol_public_products()
+        # Önce normal Trendyol web sayfası. GitHub runner public.trendyol.com DNS'ini çözemese bile www.trendyol.com çalışabilir.
+        context = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1000}, extra_http_headers=HEADERS)
+        page = context.new_page()
+        try:
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+            response = page.goto(seed_url, wait_until="domcontentloaded", timeout=45000)
+            status = response.status if response else 0
+            print(f"Trendyol web HTTP: {status} | URL: {page.url}")
+            if status == 200:
+                page.wait_for_timeout(1800)
+                soup = BeautifulSoup(page.content(), "html.parser")
+                results, seen = [], set()
+                for a in soup.find_all("a", href=True):
+                    p = card_product("Trendyol", a, page.url)
+                    if p and p["url"] not in seen:
+                        results.append(p); seen.add(p["url"])
+                        if len(results) >= MAX_PRODUCTS_PER_SITE: break
+                if results:
+                    print(f"Trendyol web: {len(results)} ürün bulundu")
+                    return results
+        except Exception as e:
+            print(f"Trendyol web uyarısı: {type(e).__name__}: {e}")
+        finally:
+            context.close()
+        products = trendyol_public_products()
+        if products:
+            return products
+        return google_discovery("Trendyol", browser)
+
     context = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1000}, extra_http_headers=HEADERS)
     page = context.new_page()
     try:
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         print(f"Tarayıcı açılıyor: {seed_url}")
         response = page.goto(seed_url, wait_until="domcontentloaded", timeout=60000)
-        status = response.status if response else "?"
+        status = response.status if response else 0
         print(f"Sayfa HTTP: {status} | URL: {page.url}")
         if status == 200:
             page.wait_for_timeout(2500)
-            for _ in range(3): page.mouse.wheel(0, 2500); page.wait_for_timeout(700)
-            html = page.content()
-            soup = BeautifulSoup(html, "html.parser")
-            print(f"Tarayıcı HTML: {len(html)} karakter")
+            for _ in range(3):
+                page.mouse.wheel(0, 2500); page.wait_for_timeout(600)
+            soup = BeautifulSoup(page.content(), "html.parser")
             results, seen = [], set()
             for a in soup.find_all("a", href=True):
                 p = card_product(site, a, page.url)
-                if not p or p["url"] in seen: continue
-                seen.add(p["url"]); results.append(p)
-                if len(results) >= MAX_PRODUCTS_PER_SITE: break
+                if p and p["url"] not in seen:
+                    results.append(p); seen.add(p["url"])
+                    if len(results) >= MAX_PRODUCTS_PER_SITE: break
             if results:
                 for p in results:
                     print(f"Bulundu: {site} | {p['price']:.2f} TL | {p['url']}")
@@ -372,12 +408,17 @@ def discover(site, seed_url, browser):
         print(f"{site} tarayıcı uyarısı: {type(e).__name__}: {e}")
     finally:
         context.close()
-    # 403/JS/DNS durumunda ücretsiz Jina Reader ile sayfayı uzaktan render ettir.
-    return discover_with_jina(site, seed_url)
+
+    # Jina artık ilk fallback değil. GitHub runner'da Jina 403 verdiği için ücretsiz Google sonuçlarını kullanıyoruz.
+    if site in {"Amazon", "Hepsiburada"}:
+        return google_discovery(site, browser)
+    return []
 
 
 def telegram_send(text):
     r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": CHANNEL_ID, "text": text, "disable_web_page_preview": False}, timeout=20)
+    print(f"Telegram HTTP: {r.status_code}")
+    print(f"Telegram cevap: {r.text[:300]}")
     r.raise_for_status()
 
 
@@ -401,45 +442,53 @@ def process_product(product):
     campaign = float(product["campaign_price"]) if product.get("campaign_price") is not None else None
     if campaign is not None and campaign >= current: campaign = None
     effective = campaign or current
+
     existing = get_product(url)
     history = get_price_history(url)
     history_prices = [float(x["price"]) for x in history]
     if not history_prices or abs(history_prices[-1] - current) > 0.001:
-        record_price(url, site, current, now.isoformat()); history_prices.append(current)
+        record_price(url, site, current, now.isoformat())
+        history_prices.append(current)
+
+    # İlk kez görülen üründe site üzerindeki eski fiyatı referans kabul etmiyoruz.
+    # En az 3 gerçek bot ölçümü olmadan indirim ilan edilmiyor.
     reference = median(history_prices) if len(history_prices) >= MIN_HISTORY_SAMPLES else None
-    discount = ((reference-effective)/reference*100) if reference else None
+    discount = ((reference - effective) / reference * 100) if reference else None
     last_posted = float(existing["last_posted_price"]) if existing and existing.get("last_posted_price") is not None else None
     last_at = datetime.fromisoformat(existing["last_posted_at"].replace("Z", "+00:00")) if existing and existing.get("last_posted_at") else None
     should_post = bool(discount is not None and discount >= MIN_DISCOUNT and (last_posted is None or effective < last_posted) and (last_at is None or now-last_at >= timedelta(hours=REPOST_COOLDOWN_HOURS)))
+
     upsert = {"product_url": url, "product_name": product["name"], "site": site, "current_price": current, "previous_price": previous, "lowest_price": min(history_prices) if history_prices else current, "coupon_code": product.get("coupon_code"), "coupon_price": campaign, "last_seen_at": now.isoformat(), "updated_at": now.isoformat()}
     if should_post:
         old = f"\n🏷️ Görünen eski fiyat: {previous:,.2f} TL" if previous else ""
         camp = f"\n🎟️ Kampanyalı fiyat: {campaign:,.2f} TL" if campaign else ""
         if product.get("coupon_code"): camp += f"\n🏷️ Kod: {product['coupon_code']}"
         if product.get("campaign_note"): camp += f"\nℹ️ {product['campaign_note']}"
-        telegram_send(f"🔥 YENİ DÜŞÜŞ!\n\n🛒 {product['name']}\n\n💰 Son 30 gün normal fiyatı: {reference:,.2f} TL\n🔥 Yeni fiyat: {effective:,.2f} TL\n📉 Gerçek indirim: %{discount:.1f}\n🏪 {site}{old}{camp}\n\n🔗 {url}")
+        message = f"🔥 YENİ DÜŞÜŞ!\n\n🛒 {product['name']}\n\n💰 Son 30 gün normal fiyatı: {reference:,.2f} TL\n🔥 Yeni fiyat: {effective:,.2f} TL\n📉 Gerçek indirim: %{discount:.1f}\n🏪 {site}{old}{camp}\n\n🔗 {url}"
+        telegram_send(message)
         upsert["last_posted_price"], upsert["last_posted_at"] = effective, now.isoformat()
-    supabase_upsert(upsert)
+
     if reference is None:
         print(f"Kontrol: {site} | anlık {current:.2f} -> efektif {effective:.2f} TL | 30g örnek={len(history_prices)} | referans=None | paylaş=False")
     else:
         print(f"Kontrol: {site} | anlık {current:.2f} -> efektif {effective:.2f} TL | 30g örnek={len(history_prices)} | referans={reference:.2f} | indirim=%{discount:.1f} | paylaş={should_post}")
+    supabase_upsert(upsert)
 
 
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--no-sandbox"])
         try:
-            all_products = []
+            total = 0
             for site, seed in SEEDS.items():
                 try:
                     products = discover(site, seed, browser)
-                    all_products.extend(products)
+                    total += len(products)
                     for product in products:
                         process_product(product)
                 except Exception as e:
                     print(f"{site} hata: {type(e).__name__}: {e}")
-            print(f"Toplam işlenen ürün: {len(all_products)}")
+            print(f"Toplam işlenen ürün: {total}")
         finally:
             browser.close()
 
