@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -103,7 +104,7 @@ def prices_from_text(text):
     pattern = r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)"
     for match in re.finditer(pattern, text, re.I):
         start = match.start(1)
-        prefix = text[max(0, start - 3):start]
+        prefix = text[max(0, start - 5):start]
         if "%" in prefix:
             continue
         p = clean_price(match.group(1))
@@ -123,9 +124,7 @@ def labeled_price(text, labels):
 
 
 def hepsiburada_labeled_price(text, labels):
-    """HB'de etiketli gerçek fiyatı bul. Taksit/puan/kupon rakamlarını fiyat sanma."""
     for label in labels:
-        # Para birimi zorunlu: "Sepette 10" gibi metinleri yanlışlıkla fiyat kabul etme.
         pattern = re.escape(label) + r"[^0-9₺]{0,70}(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
         m = re.search(pattern, text, re.I)
         if m:
@@ -136,17 +135,16 @@ def hepsiburada_labeled_price(text, labels):
 
 
 def hepsiburada_price_candidates(text):
-    """HB kartındaki TL adaylarını bağlamına göre puanla."""
     candidates = []
     pattern = r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)"
     negative = [
         "taksit", "ay x", "x ay", "puan", "worldpuan", "parapuan", "bonus",
-        "parafpuan", "chip-para", "maximum puan", "kupon kazan", "kupon tutarı",
-        "indirim tutarı", "kazanç"
+        "parafpara", "parafpuan", "chip-para", "maximum puan", "kupon kazan",
+        "kupon tutarı", "indirim tutarı", "kazanç", "hediye çek", "çek kazan"
     ]
     positive = [
         "fiyat", "satış fiyatı", "güncel fiyat", "peşin fiyat", "sepette", "sepetteki fiyat",
-        "sepette indirimli fiyat", "hemen al"
+        "sepette indirimli fiyat", "hemen al", "kampanyalı fiyat"
     ]
     old_price_words = ["eski fiyat", "önceki fiyat", "piyasa fiyatı"]
 
@@ -155,39 +153,34 @@ def hepsiburada_price_candidates(text):
         if value is None or value <= 0:
             continue
         start = match.start(1)
-        context = text[max(0, start - 100):min(len(text), match.end() + 80)].lower()
+        context = text[max(0, start - 120):min(len(text), match.end() + 100)].lower()
         score = 0
         if any(word in context for word in negative):
-            score -= 10
+            score -= 15
         if any(word in context for word in positive):
-            score += 6
+            score += 8
         if any(word in context for word in old_price_words):
-            score -= 5
-        # Tek/çok düşük rakamlar çoğunlukla taksit veya puan olduğundan cezalandır.
-        if value < 100:
-            score -= 4
+            score -= 8
+        if value < 50:
+            score -= 8
+        elif value < 100:
+            score -= 3
         elif value >= 500:
-            score += 1
+            score += 2
         candidates.append((score, value, context))
 
     return candidates
 
 
 def hepsiburada_prices(text):
-    """Hepsiburada kartından gerçek satış fiyatını ve varsa görünen eski fiyatı ayır."""
     current = hepsiburada_labeled_price(text, [
-        "Sepetteki Fiyat",
-        "Sepette indirimli fiyat",
-        "Sepette",
-        "Peşin Fiyat",
-        "Güncel Fiyat",
-        "Satış Fiyatı",
+        "Sepetteki Fiyat", "Sepette indirimli fiyat", "Sepette", "Peşin Fiyat",
+        "Güncel Fiyat", "Satış Fiyatı", "Kampanyalı Fiyat"
     ])
 
     if current is None:
         candidates = hepsiburada_price_candidates(text)
         if candidates:
-            # Önce bağlam puanı, eşitlikte daha yüksek gerçek satış fiyatı.
             candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
             current = candidates[0][1]
 
@@ -200,8 +193,75 @@ def hepsiburada_prices(text):
         if previous is not None and previous > current:
             break
         previous = None
-
     return current, previous
+
+
+def extract_campaign(text, current):
+    """Rakip fırsat kanallarında sık görülen kampanya kalıplarını güvenli biçimde çıkar."""
+    result = {"campaign_price": None, "coupon_code": None, "campaign_note": None}
+    if not text or current is None:
+        return result
+
+    # Açıkça belirtilen "tanesi X TL" kalıbı en güvenilir kampanya fiyatıdır.
+    patterns = [
+        r"(?:tanesi|adet fiyatı|birim fiyatı)\s*(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)",
+        r"(?:sepette|ödeme adımında|ödemede)\s*(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            value = clean_price(m.group(1))
+            if value and value < current:
+                result["campaign_price"] = value
+                break
+
+    # 2. ürün 1 TL / 2 al 1 öde / 3 al 2 öde gibi kampanyalar.
+    if result["campaign_price"] is None:
+        m = re.search(r"(\d+)\s*(?:\.\s*ürün|\.ürün|ürün)\s*(\d+(?:[.,]\d+)?)\s*TL", text, re.I)
+        if m:
+            buy_n = int(m.group(1))
+            second_price = clean_price(m.group(2))
+            if buy_n > 1 and second_price is not None:
+                result["campaign_price"] = (current * (buy_n - 1) + second_price) / buy_n
+        else:
+            m = re.search(r"(\d+)\s*(?:al\s*)?(\d+)\s*öde", text, re.I)
+            if m:
+                buy_n, pay_n = int(m.group(1)), int(m.group(2))
+                if buy_n > pay_n > 0:
+                    result["campaign_price"] = current * pay_n / buy_n
+
+    # X/Y TL kuponu: X alışveriş eşiği, Y indirim. Ürünün tek başına eşiği karşılayıp karşılamadığını varsayma;
+    # yalnızca ürün fiyatı eşiği karşılıyorsa güvenli bir aday üret.
+    if result["campaign_price"] is None:
+        m = re.search(r"(\d{2,6})\s*/\s*(\d{1,4})\s*TL\s*(?:kupon|indirim)?", text, re.I)
+        if m:
+            threshold, discount = float(m.group(1)), float(m.group(2))
+            if current >= threshold and 0 < discount < current:
+                result["campaign_price"] = current - discount
+
+    # Açık kampanya kodlarını kaydet; hesaplamayı kodun tutarı net değilse yapma.
+    code_patterns = [
+        r"(?:kod|kupon kodu|kodu)\s*[:：]?\s*([A-Z0-9_-]{4,30})",
+        r"\b([A-Z]{3,}[0-9]{1,4})\b\s*(?:kodu|ile)",
+    ]
+    for pattern in code_patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            code = m.group(1).upper()
+            if code not in {"TL", "FIRSAT", "KUPON"}:
+                result["coupon_code"] = code
+                break
+
+    # Kampanya notunu kısa ve Telegram'a uygun tut.
+    notes = []
+    for phrase in ["Prime Üyelere Özel", "Premium Üyelik", "Ücretsiz Kargo", "Mobil Uygulamada Geçerli", "2'li alımda", "3'lü alımda", "4 al 3 öde", "2 al 1 öde", "Çok Al Az Öde"]:
+        if re.search(re.escape(phrase), text, re.I):
+            notes.append(phrase)
+    if result["coupon_code"]:
+        notes.append(f"Kod: {result['coupon_code']}")
+    if notes:
+        result["campaign_note"] = " • ".join(dict.fromkeys(notes))
+    return result
 
 
 def canonical_url(href):
@@ -273,12 +333,66 @@ def card_product(site, a, base_url):
     if previous is not None and previous <= current:
         previous = None
 
+    campaign = extract_campaign(best, current)
     name = a.get("aria-label") or a.get("title") or text
     name = re.sub(r"\s+", " ", name).strip()
     name = re.sub(r"(?:Sepete Ekle|Hızlı Bakış|Kargo Bedava)$", "", name).strip()
     if len(name) < 5:
         return None
-    return {"name": name[:300], "price": current, "previous_display_price": previous, "url": href, "site": site}
+    return {
+        "name": name[:300], "price": current, "previous_display_price": previous,
+        "campaign_price": campaign["campaign_price"], "coupon_code": campaign["coupon_code"],
+        "campaign_note": campaign["campaign_note"], "url": href, "site": site
+    }
+
+
+def hepsiburada_detail(page, product):
+    """HB kategori kartı bozuksa ürün sayfasındaki JSON-LD fiyatını kullan."""
+    try:
+        response = page.goto(product["url"], wait_until="domcontentloaded", timeout=30000)
+        if not response or response.status >= 400:
+            return product
+        page.wait_for_timeout(900)
+
+        # Önce yapılandırılmış ürün verisi.
+        for raw in page.locator('script[type="application/ld+json"]').all_text_contents():
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            items = data.get("@graph", []) if isinstance(data, dict) else data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict) or item.get("@type") != "Product":
+                    continue
+                offers = item.get("offers") or {}
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+                price = clean_price(offers.get("price")) if isinstance(offers, dict) else None
+                if price and price > 0:
+                    product["price"] = price
+                    product["previous_display_price"] = product.get("previous_display_price")
+                    product["name"] = str(item.get("name") or product["name"])[:300]
+                    break
+
+        # JSON-LD yoksa ürün sayfasının görünen metnini tekrar değerlendir.
+        detail_text = page.locator("body").inner_text(timeout=10000)
+        detail_current, detail_previous = hepsiburada_prices(detail_text)
+        if detail_current and (product.get("price") is None or product["price"] < 50 or abs(detail_current - product["price"]) > max(100, product["price"] * 0.25)):
+            product["price"] = detail_current
+        if detail_previous and detail_previous > product["price"]:
+            product["previous_display_price"] = detail_previous
+
+        campaign = extract_campaign(detail_text, product["price"])
+        if campaign["campaign_price"]:
+            product["campaign_price"] = campaign["campaign_price"]
+        if campaign["coupon_code"]:
+            product["coupon_code"] = campaign["coupon_code"]
+        if campaign["campaign_note"]:
+            product["campaign_note"] = campaign["campaign_note"]
+        return product
+    except Exception as e:
+        print(f"HB detay uyarısı: {type(e).__name__}: {e}")
+        return product
 
 
 def prepare_page(page, site):
@@ -338,9 +452,17 @@ def discover(site, seed_url, browser):
                 continue
             seen.add(p["url"])
             results.append(p)
-            print(f"Bulundu: {site} | {p['price']:.2f} TL | {p['url']}")
             if len(results) >= MAX_PRODUCTS_PER_SITE:
                 break
+
+        if site == "Hepsiburada":
+            print("Hepsiburada: ürün detay fiyatları doğrulanıyor...")
+            for p in results:
+                p = hepsiburada_detail(page, p)
+
+        for p in results:
+            extra = f" | kampanya={p['campaign_price']:.2f} TL" if p.get("campaign_price") else ""
+            print(f"Bulundu: {site} | {p['price']:.2f} TL{extra} | {p['url']}")
 
         print(f"{site}: {len(results)} ürün bulundu")
         return results
@@ -377,24 +499,31 @@ def process_product(product):
     previous_display = product.get("previous_display_price")
     if previous_display is not None:
         previous_display = float(previous_display)
+    campaign_price = product.get("campaign_price")
+    if campaign_price is not None:
+        campaign_price = float(campaign_price)
+        if campaign_price >= current:
+            campaign_price = None
 
+    effective_price = campaign_price or current
     existing = get_product(url)
     history = get_price_history(url)
     history_prices = [float(row["price"]) for row in history]
 
+    # Geçmişte daima ana/normal satış fiyatını tutuyoruz; kuponlu fiyatı geçmişe karıştırmıyoruz.
     if not history_prices or history_prices[-1] != current:
         record_price(url, site, current, now.isoformat())
         history_prices.append(current)
 
     reference = median(history_prices) if len(history_prices) >= MIN_HISTORY_SAMPLES else None
-    discount = ((reference - current) / reference * 100) if reference and reference > 0 else None
+    discount = ((reference - effective_price) / reference * 100) if reference and reference > 0 else None
 
     last_posted_price = float(existing["last_posted_price"]) if existing and existing.get("last_posted_price") is not None else None
     last_posted_at = datetime.fromisoformat(existing["last_posted_at"].replace("Z", "+00:00")) if existing and existing.get("last_posted_at") else None
 
     should_post = False
     if discount is not None and discount >= MIN_DISCOUNT:
-        if last_posted_price is None or current < last_posted_price:
+        if last_posted_price is None or effective_price < last_posted_price:
             if last_posted_at is None or now - last_posted_at >= timedelta(hours=REPOST_COOLDOWN_HOURS):
                 should_post = True
 
@@ -405,32 +534,41 @@ def process_product(product):
         "current_price": current,
         "previous_price": previous_display,
         "lowest_price": min(history_prices) if history_prices else current,
+        "coupon_code": product.get("coupon_code"),
+        "coupon_price": campaign_price,
         "last_seen_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
 
     if should_post:
         old_text = f"\n🏷️ Görünen eski fiyat: {previous_display:,.2f} TL" if previous_display else ""
+        campaign_text = ""
+        if campaign_price:
+            campaign_text = f"\n🎟️ Kampanyalı fiyat: {campaign_price:,.2f} TL"
+        if product.get("coupon_code"):
+            campaign_text += f"\n🏷️ Kod: {product['coupon_code']}"
+        if product.get("campaign_note"):
+            campaign_text += f"\nℹ️ {product['campaign_note']}"
         text = (
             "🔥 YENİ DÜŞÜŞ!\n\n"
             f"🛒 {product['name']}\n\n"
             f"💰 Son 30 gün normal fiyatı: {reference:,.2f} TL\n"
-            f"🔥 Yeni fiyat: {current:,.2f} TL\n"
+            f"🔥 Yeni fiyat: {effective_price:,.2f} TL\n"
             f"📉 Gerçek indirim: %{discount:.1f}\n"
             f"🏪 {site}"
-            f"{old_text}\n\n"
+            f"{old_text}{campaign_text}\n\n"
             f"🔗 {url}"
         )
         telegram_send(text)
-        upsert["last_posted_price"] = current
+        upsert["last_posted_price"] = effective_price
         upsert["last_posted_at"] = now.isoformat()
 
     supabase_upsert(upsert)
 
     if reference is None:
-        print(f"Kontrol: {site} | anlık {current:.2f} -> {current:.2f} TL | 30g örnek={len(history_prices)} | referans=None | paylaş=False")
+        print(f"Kontrol: {site} | anlık {current:.2f} -> efektif {effective_price:.2f} TL | 30g örnek={len(history_prices)} | referans=None | paylaş=False")
     else:
-        print(f"Kontrol: {site} | anlık {current:.2f} -> {current:.2f} TL | 30g örnek={len(history_prices)} | referans={reference:.2f} | indirim=%{discount:.1f} | paylaş={should_post}")
+        print(f"Kontrol: {site} | anlık {current:.2f} -> efektif {effective_price:.2f} TL | 30g örnek={len(history_prices)} | referans={reference:.2f} | indirim=%{discount:.1f} | paylaş={should_post}")
 
 
 def main():
