@@ -16,12 +16,15 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36",
     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Sec-CH-UA": '"Chromium";v="151", "Google Chrome";v="151", "Not_A Brand";v="99"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
 }
 
 SEEDS = {
     "Amazon": "https://www.amazon.com.tr/gp/goldbox",
-    "Hepsiburada": "https://www.hepsiburada.com/kampanyalar",
-    "Trendyol": "https://www.trendyol.com/butik-x-b175196",
+    "Hepsiburada": "https://www.hepsiburada.com/",
+    "Trendyol": "https://www.trendyol.com/tr/butik-x-b175196",
     "Pazarama": "https://www.pazarama.com/son-30-gunun-en-dusuk-fiyatli-urunleri-k-VRTCTGRY",
 }
 
@@ -136,8 +139,8 @@ def likely_product_url(site, path):
     if site == "Trendyol":
         return "-p-" in p and len(p.strip("/")) > 10
     if site == "Pazarama":
-        parts = [x for x in p.split("/") if x]
-        return len(parts) >= 2 and any(ch.isdigit() for ch in p)
+        # Pazarama ürün URL'leri çoğunlukla tek path segmentinde ...-p-<ürünId> şeklinde.
+        return "-p-" in p and bool(re.search(r"-p-\d+", p))
     return False
 
 
@@ -149,6 +152,7 @@ def card_product(site, a, base_url):
     text = a.get_text(" ", strip=True)
     if len(text) < 5:
         return None
+
     node = a
     best = text
     for _ in range(5):
@@ -165,17 +169,26 @@ def card_product(site, a, base_url):
         if current is None:
             prices = prices_from_text(best)
             current = prices[0] if prices else None
-            other_prices = prices[1:] if prices else []
-            previous = max(other_prices) if other_prices else None
+            previous = max(prices[1:]) if len(prices) > 1 else None
         if current is None:
             return None
+    elif site == "Pazarama":
+        prices = prices_from_text(best)
+        if not prices:
+            return None
+        # Pazarama kartlarında "Son 30 Günün En Düşük Fiyatı X TL ... Y TL"
+        # biçimi çok yaygın. X tarihsel düşük, Y güncel satış/sepet fiyatıdır.
+        current = prices[-1]
+        previous = None
+        low_match = re.search(r"Son\s+30\s+Günün\s+En\s+Düşük\s+Fiyatı", best, re.I)
+        if low_match and prices[0] > current:
+            previous = prices[0]
     else:
         prices = prices_from_text(best)
         if not prices:
             return None
         current = prices[0]
-        other_prices = prices[1:]
-        previous = max(other_prices) if other_prices else None
+        previous = max(prices[1:]) if len(prices) > 1 else None
 
     if previous is not None and previous <= current:
         previous = None
@@ -188,27 +201,71 @@ def card_product(site, a, base_url):
     return {"name": name[:300], "price": current, "previous_display_price": previous, "url": href, "site": site}
 
 
+def prepare_page(page, site):
+    # Trendyol'da önce ana TR storefront'una girerek ülke/yerel storefront bilgisinin
+    # oturumda oluşmasına izin veriyoruz. Seed URL de /tr/ ile başlıyor.
+    if site == "Trendyol":
+        try:
+            page.goto("https://www.trendyol.com/", wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(1800)
+            print(f"Trendyol TR ana sayfa URL: {page.url}")
+        except Exception as e:
+            print(f"Trendyol TR ön hazırlık uyarısı: {type(e).__name__}: {e}")
+
+
 def discover(site, seed_url, browser):
-    context = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1000}, extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]})
+    context = browser.new_context(
+        locale="tr-TR",
+        timezone_id="Europe/Istanbul",
+        user_agent=HEADERS["User-Agent"],
+        viewport={"width": 1440, "height": 1000},
+        extra_http_headers=HEADERS,
+    )
     page = context.new_page()
     try:
+        # Basit otomasyon izlerini azalt; gerçek fiyat/ürün verisini değiştirmez.
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        prepare_page(page, site)
+
         print(f"Tarayıcı açılıyor: {seed_url}")
         response = page.goto(seed_url, wait_until="domcontentloaded", timeout=60000)
         status = response.status if response else "?"
         print(f"Sayfa HTTP: {status} | URL: {page.url}")
+
+        # Hepsiburada kampanya endpoint'i 403 verirse ana storefront ve ürün odaklı
+        # bir sayfayı aynı oturumla deniyoruz. GitHub Actions IP'si yine bloklanırsa
+        # logda açıkça görülecek.
+        if site == "Hepsiburada" and status == 403:
+            for fallback in [
+                "https://www.hepsiburada.com/aradiginburada",
+                "https://www.hepsiburada.com/premium-kupon",
+            ]:
+                print(f"Hepsiburada fallback deneniyor: {fallback}")
+                try:
+                    response = page.goto(fallback, wait_until="domcontentloaded", timeout=45000)
+                    status = response.status if response else "?"
+                    print(f"Hepsiburada fallback HTTP: {status} | URL: {page.url}")
+                    if status == 200:
+                        break
+                except Exception as e:
+                    print(f"Hepsiburada fallback hatası: {type(e).__name__}: {e}")
+
         page.wait_for_timeout(3500)
         for _ in range(3):
             page.mouse.wheel(0, 2500)
             page.wait_for_timeout(1200)
         page.mouse.wheel(0, -8000)
         page.wait_for_timeout(1000)
+
         body_text = page.locator("body").inner_text(timeout=10000)[:4000]
         lowered = body_text.lower()
         if any(x in lowered for x in ["access denied", "erişim engellendi", "robot", "captcha", "verify you are human"]):
             print("Uyarı: sayfada erişim/bot doğrulama metni görüldü.")
+
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
         print(f"Tarayıcı HTML: {len(html)} karakter")
+
         results = []
         seen = set()
         for a in soup.find_all("a", href=True):
@@ -217,8 +274,10 @@ def discover(site, seed_url, browser):
                 continue
             seen.add(p["url"])
             results.append(p)
+            print(f"Bulundu: {site} | {p['price']:.2f} TL | {p['url']}")
             if len(results) >= MAX_PRODUCTS_PER_SITE:
                 break
+
         print(f"{site}: {len(results)} ürün bulundu")
         return results
     except PlaywrightTimeoutError as e:
@@ -258,7 +317,6 @@ def process(product):
     current = float(product["price"])
     now = datetime.now(timezone.utc)
 
-    # Aynı fiyatı her 5 dakikada tekrar kaydetme; yalnızca fiyat değişince yeni gözlem ekle.
     history_rows = get_price_history(url)
     history_prices = [float(row["price"]) for row in history_rows if row.get("price") is not None]
     last_history_price = history_prices[0] if history_prices else None
@@ -316,8 +374,8 @@ def main():
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         try:
             total = 0
-            for site, seed in SEEDS.items():
-                products = discover(site, seed, browser)
+            for site, seed_url in SEEDS.items():
+                products = discover(site, seed_url, browser)
                 for product in products:
                     try:
                         process(product)
