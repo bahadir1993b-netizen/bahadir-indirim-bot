@@ -16,8 +16,12 @@ SEEDS={"Amazon":"https://www.amazon.com.tr/gp/goldbox","Hepsiburada":"https://ww
 MIN_DISCOUNT=10.0
 REPOST_COOLDOWN_HOURS=12
 MAX_PRODUCTS_PER_SITE=12
-PRICE_HISTORY_DAYS=30
+PRICE_HISTORY_DAYS=90
 MIN_HISTORY_SAMPLES=3
+
+# Supabase kolonlari projeden otomatik kesfedilir; boylece schema'ya olmayan alanlari POST etmeyiz.
+_products_columns=None
+_history_columns=None
 
 def sb_headers(prefer=None):
     h={"apikey":SUPABASE_KEY,"Content-Type":"application/json","Accept":"application/json"}
@@ -30,56 +34,77 @@ def sb_get(path,params=None):
     if r.status_code>=400: raise requests.HTTPError(f"{r.status_code} {r.text[:500]}",response=r)
     return r.json()
 
+def schema_columns(table):
+    try:
+        rows=sb_get(table,{"select":"*","limit":"1"})
+        if rows:
+            return set(rows[0].keys())
+    except Exception as e:
+        print(f"Supabase {table} kolon kesfi hatasi: {e}")
+    return set()
+
+def get_product_columns():
+    global _products_columns
+    if _products_columns is None:
+        _products_columns=schema_columns("products")
+        print(f"Supabase products kolonlari: {sorted(_products_columns)}")
+    return _products_columns
+
+def get_history_columns():
+    global _history_columns
+    if _history_columns is None:
+        _history_columns=schema_columns("price_history")
+        print(f"Supabase price_history kolonlari: {sorted(_history_columns)}")
+    return _history_columns
+
+def compatible_payload(payload,columns):
+    if not columns:return payload
+    return {k:v for k,v in payload.items() if k in columns}
+
 def sb_upsert(p):
-    # on_conflict=product_url requires a UNIQUE constraint. Existing projects may not have it.
-    # Therefore we first look up the product, then PATCH it if found, otherwise INSERT it.
     url=p.get("url")
     if not url: raise ValueError("product url missing")
-    try:
-        existing=sb_get("products",{"select":"*","product_url":f"eq.{url}","limit":"1"})
-    except Exception as e:
-        print(f"Supabase ürün arama hatası: {e}"); existing=[]
+    existing=sb_get("products",{"select":"*","product_url":f"eq.{url}","limit":"1"})
+    cols=get_product_columns()
     if existing:
-        row=existing[0]
-        rid=row.get("id")
+        row=existing[0];rid=row.get("id")
         if rid is not None:
-            payload=dict(p)
+            payload=compatible_payload(dict(p),cols)
             payload.pop("url",None)
-            r=requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers("return=representation"),json=payload,timeout=20)
-            if r.ok:
-                d=r.json(); return d[0] if d else row
-            print(f"Supabase PATCH başarısız: HTTP {r.status_code} | {r.text[:500]}")
+            if payload:
+                r=requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers("return=representation"),json=payload,timeout=20)
+                if r.ok:
+                    d=r.json();return d[0] if d else row
+                print(f"Supabase PATCH basarisiz: HTTP {r.status_code} | {r.text[:500]}")
         return row
-    # New row: no on_conflict dependency.
-    variants=[p]
-    core={k:p[k] for k in ("name","price","previous_display_price","url","site") if k in p}
-    if core!=p: variants.append(core)
-    slim={k:p[k] for k in ("name","price","url","site") if k in p}
-    if slim!=core: variants.append(slim)
-    last_error=None
-    for i,payload in enumerate(variants,1):
-        r=requests.post(f"{SUPABASE_URL}/rest/v1/products",headers=sb_headers("return=representation"),json=payload,timeout=20)
-        if r.ok:
-            d=r.json(); return d[0] if d else payload
-        last_error=f"HTTP {r.status_code}: {r.text[:500]}"
-        print(f"Supabase yeni ürün deneme {i} başarısız: {last_error}")
-    raise requests.HTTPError(last_error or "Supabase products insert failed")
+    raw=dict(p);raw["product_url"]=raw.get("url");raw.pop("url",None)
+    payload=compatible_payload(raw,cols)
+    if not payload:
+        # Tablo bos ise kolon kesfi bos doner; onceki bilinen minimum alanlarla dene.
+        payload={"product_url":url,"site":p.get("site"),"price":p.get("price")}
+    r=requests.post(f"{SUPABASE_URL}/rest/v1/products",headers=sb_headers("return=representation"),json=payload,timeout=20)
+    if r.ok:
+        d=r.json();return d[0] if d else payload
+    raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:500]}",response=r)
 
 def record_price(url,site,value,at):
-    payload={"product_url":url,"site":site,"price":value}
-    for time_key in ("observed_at","recorded_at"):
-        q=dict(payload); q[time_key]=at
-        r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json=q,timeout=20)
-        if r.ok:return
-        print(f"Supabase price_history {time_key}: HTTP {r.status_code} | {r.text[:300]}")
-    raise requests.HTTPError("price_history insert failed")
+    cols=get_history_columns()
+    payload={"product_url":url,"site":site,"price":value,"observed_at":at,"recorded_at":at,"created_at":at}
+    payload=compatible_payload(payload,cols)
+    if not payload:
+        payload={"product_url":url,"site":site,"price":value}
+    r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json=payload,timeout=20)
+    if not r.ok:raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:500]}",response=r)
 
 def history(url):
     cutoff=(datetime.now(timezone.utc)-timedelta(days=PRICE_HISTORY_DAYS)).isoformat()
-    for time_key in ("observed_at","recorded_at"):
+    cols=get_history_columns()
+    time_key=next((x for x in ("observed_at","recorded_at","created_at") if x in cols),None)
+    if time_key:
         try:return sb_get("price_history",{"select":f"price,{time_key}","product_url":f"eq.{url}",time_key:f"gte.{cutoff}","order":f"{time_key}.desc"})
-        except requests.HTTPError as e:print(f"Supabase history {time_key} kullanılamadı: {e}")
-    return []
+        except requests.HTTPError as e:print(f"Supabase history {time_key} kullanilamadi: {e}")
+    try:return sb_get("price_history",{"select":"price","product_url":f"eq.{url}"})
+    except Exception as e:print(f"Supabase history okunamadi: {e}");return []
 
 def price(v):
     if v is None:return None
@@ -132,19 +157,18 @@ def unwrap(url):
     return url
 
 def extract_candidate_urls(site,html,base):
-    html=html or ""; html2=html.replace("\\/","/").replace("\\u002F","/").replace("\\u003A",":"); soup=BeautifulSoup(html,"html.parser"); out=[]; seen=set()
+    html=html or "";html2=html.replace("\\/","/").replace("\\u002F","/").replace("\\u003A",":");soup=BeautifulSoup(html,"html.parser");out=[];seen=set()
     def add(raw,title=""):
         raw=unwrap(raw).replace("\\/","/")
         if not raw:return
         u=canonical(urljoin(base,raw))
         if product_url(site,u) and u not in seen:
             seen.add(u);out.append((u,(title or "Ürün").strip()[:300]))
-    # Search-engine RSS is XML. Read <link> values explicitly before generic HTML parsing.
     if "<rss" in html2[:1000].lower() or "<item>" in html2.lower():
         try:
             xs=BeautifulSoup(html2,"xml")
             for item in xs.find_all("item"):
-                link=item.find("link"); title=item.find("title")
+                link=item.find("link");title=item.find("title")
                 if link and link.get_text(strip=True):add(link.get_text(strip=True),title.get_text(" ",strip=True) if title else "Ürün")
         except Exception as e:print(f"RSS ayrıştırma uyarısı: {e}")
     for a in soup.find_all("a",href=True):
@@ -159,7 +183,7 @@ def extract_candidate_urls(site,html,base):
     return out
 
 def parse_jsonld(html):
-    res={}; soup=BeautifulSoup(html or "","html.parser")
+    res={};soup=BeautifulSoup(html or "","html.parser")
     for s in soup.find_all("script",type="application/ld+json"):
         try:o=json.loads(s.string or s.get_text())
         except:continue
@@ -183,9 +207,6 @@ def make_product(site,name,url,text,current=None,previous=None):
         for label in ["Önce","Eski Fiyat","Liste Fiyatı","Piyasa Fiyatı"]:
             previous=labeled(text,[label])
             if previous and previous>current:break
-    if not previous and ps:
-        higher=[x for x in ps if x>current*1.05]
-        if higher:previous=min(higher)
     campaign=labeled(text,["Sepetteki Fiyat","Sepette"]);coupon=None
     m=re.search(r"(?:kupon kodu|kupon|kod)\s*[:：]?\s*([A-Z0-9_-]{4,30})",text,re.I)
     if m:coupon=m.group(1).upper()
@@ -199,8 +220,7 @@ def page_product(site,url,title,browser):
         page.wait_for_timeout(1800);html=page.content();text=page.locator("body").inner_text(timeout=10000);jd=parse_jsonld(html)
         current=jd.get("price") or labeled(text,["Sepetteki Fiyat","Sepette","İndirimli Fiyat","Satış Fiyatı","Güncel Fiyat","Fiyat"]);ps=prices(text)
         if current is None and ps:current=ps[0]
-        higher=[x for x in ps if current and x>current*1.05];previous=min(higher) if higher else None
-        return make_product(site,jd.get("name") or title,url,text,current,previous) or make_product(site,title,url,text,current,previous)
+        return make_product(site,jd.get("name") or title,url,text,current,None) or make_product(site,title,url,text,current,None)
     except Exception as e:print(f"{site} ürün sayfası hata: {type(e).__name__}: {e}");return None
     finally:ctx.close()
 
@@ -211,7 +231,7 @@ def direct_discover(site,seed,browser):
         if status!=200:return []
         page.wait_for_timeout(3500)
         for _ in range(6):page.mouse.wheel(0,3500);page.wait_for_timeout(600)
-        html=page.content();
+        html=page.content()
         if site=="Trendyol":print(f"Trendyol teşhis: -p- sayısı={html.lower().count('-p-')}, productId sayısı={len(re.findall(r'productid',html,re.I))}")
         c=extract_candidate_urls(site,html,page.url);print(f"{site} web: {len(c)} ürün linki bulundu; HTML={len(html)}")
         return c
