@@ -65,7 +65,8 @@ def record_price(url, site, price, recorded_at):
 def get_price_history(url, days=PRICE_HISTORY_DAYS):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     encoded_url = requests.utils.quote(url, safe="")
-    query = f"price_history?select=price,recorded_at&product_url=eq.{encoded_url}&recorded_at=gte.{requests.utils.quote(cutoff, safe=':+-T.')}&order=recorded_at.desc"
+    encoded_cutoff = requests.utils.quote(cutoff, safe="")
+    query = f"price_history?select=price,recorded_at&product_url=eq.{encoded_url}&recorded_at=gte.{encoded_cutoff}&order=recorded_at.desc"
     return supabase_get(query)
 
 
@@ -315,8 +316,8 @@ def main():
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         try:
             total = 0
-            for site, seed_url in SEEDS.items():
-                products = discover(site, seed_url, browser)
+            for site, seed in SEEDS.items():
+                products = discover(site, seed, browser)
                 for product in products:
                     try:
                         process(product)
