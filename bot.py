@@ -34,8 +34,6 @@ session.headers.update(HEADERS)
 
 
 def supabase_headers(prefer=None):
-    # Supabase isteklerinde mağaza/tarayıcı User-Agent'ını göndermiyoruz.
-    # Yeni sb_secret anahtarı için yalnızca apikey yeterlidir.
     headers = {
         "apikey": SUPABASE_KEY,
         "Content-Type": "application/json",
@@ -50,11 +48,7 @@ def supabase_headers(prefer=None):
 
 
 def supabase_get(query):
-    r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/{query}",
-        headers=supabase_headers(),
-        timeout=20,
-    )
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{query}", headers=supabase_headers(), timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -91,8 +85,14 @@ def clean_price(value):
 def prices_from_text(text):
     vals = []
     pattern = r"(?:₺\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)"
-    for m in re.findall(pattern, text, re.I):
-        p = clean_price(m)
+    for match in re.finditer(pattern, text, re.I):
+        # Amazon kartlarında "%5 ... 5 TL ... 2.659,05 TL" gibi metinler
+        # olabiliyor. Yüzde değerini fiyat olarak kabul etme.
+        start = match.start()
+        prefix = text[max(0, start - 2):start]
+        if "%" in prefix:
+            continue
+        p = clean_price(match.group(1))
         if p is not None and p > 0:
             vals.append(p)
     return vals
