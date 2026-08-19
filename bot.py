@@ -14,7 +14,7 @@ HEADERS={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537
 SEEDS={"Amazon":"https://www.amazon.com.tr/gp/goldbox","Hepsiburada":"https://www.hepsiburada.com/ara?q=indirim","Trendyol":"https://www.trendyol.com/sr?q=indirim"}
 MIN_DISCOUNT=10.0
 REPOST_COOLDOWN_HOURS=12
-MAX_PRODUCTS_PER_SITE=12
+MAX_PRODUCTS_PER_SITE=6
 PRICE_HISTORY_DAYS=90
 MIN_HISTORY_SAMPLES=3
 _products_columns=None
@@ -27,7 +27,7 @@ def sb_headers(prefer=None):
     return h
 
 def sb_get(path,params=None):
-    r=requests.get(f"{SUPABASE_URL}/rest/v1/{path}",headers=sb_headers(),params=params,timeout=20)
+    r=requests.get(f"{SUPABASE_URL}/rest/v1/{path}",headers=sb_headers(),params=params,timeout=15)
     if r.status_code>=400:raise requests.HTTPError(f"{r.status_code} {r.text[:500]}",response=r)
     return r.json()
 
@@ -55,18 +55,18 @@ def sb_upsert(p):
     if existing:
         row=existing[0];rid=row.get("id");payload=compatible_payload(dict(p),cols);payload.pop("url",None)
         if rid is not None and payload:
-            r=requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers("return=representation"),json=payload,timeout=20)
+            r=requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers("return=representation"),json=payload,timeout=15)
             if r.ok:
                 d=r.json();return d[0] if d else row
         return row
     raw=dict(p);raw["product_url"]=raw.pop("url");payload=compatible_payload(raw,cols) or {"product_url":url,"site":p.get("site"),"price":p.get("price")}
-    r=requests.post(f"{SUPABASE_URL}/rest/v1/products",headers=sb_headers("return=representation"),json=payload,timeout=20)
+    r=requests.post(f"{SUPABASE_URL}/rest/v1/products",headers=sb_headers("return=representation"),json=payload,timeout=15)
     if not r.ok:raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:500]}",response=r)
     d=r.json();return d[0] if d else payload
 
 def record_price(url,site,value,at):
     cols=get_history_columns();payload=compatible_payload({"product_url":url,"site":site,"price":value,"observed_at":at,"recorded_at":at,"created_at":at},cols) or {"product_url":url,"site":site,"price":value}
-    r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json=payload,timeout=20)
+    r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json=payload,timeout=15)
     if not r.ok:print(f"Supabase price_history yazilamadi: {r.status_code} {r.text[:300]}")
 
 def history(url):
@@ -150,7 +150,7 @@ def search_fallback(site,browser):
     urls=[f"https://www.bing.com/search?q={q}",f"https://www.google.com/search?q={q}"]
     for u in urls:
         try:
-            r=requests.get(u,headers=HEADERS,timeout=20)
+            r=requests.get(u,headers=HEADERS,timeout=8)
             print(f"{site} arama {urlparse(u).netloc} HTTP: {r.status_code}")
             if r.status_code==200:
                 got=extract_candidate_urls(site,r.text,u)
@@ -191,14 +191,14 @@ def make_product(site,name,url,text,current=None,previous=None):
 def page_product(site,url,title,browser):
     ctx=browser.new_context(locale="tr-TR",timezone_id="Europe/Istanbul",user_agent=HEADERS["User-Agent"],viewport={"width":1440,"height":1000},extra_http_headers=HEADERS);page=ctx.new_page()
     try:
-        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});");r=page.goto(url,wait_until="domcontentloaded",timeout=30000)
+        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});");r=page.goto(url,wait_until="domcontentloaded",timeout=15000)
         if not r or r.status>=400:return None
-        page.wait_for_timeout(1800);html=page.content();text=page.locator("body").inner_text(timeout=10000);jd=parse_jsonld(html)
+        page.wait_for_timeout(700);html=page.content();text=page.locator("body").inner_text(timeout=5000);jd=parse_jsonld(html)
         current=jd.get("price") or labeled(text,["Sepetteki Fiyat","Sepette","İndirimli Fiyat","Satış Fiyatı","Güncel Fiyat","Fiyat"])
         if site=="Amazon" and current is None:
             for sel in [".a-price .a-offscreen","#corePrice_feature_div .a-offscreen","#priceblock_ourprice","#priceblock_dealprice",".apexPriceToPay .a-offscreen","[data-a-color='price'] .a-offscreen"]:
                 try:
-                    v=page.locator(sel).first.inner_text(timeout=1500);current=price(v)
+                    v=page.locator(sel).first.inner_text(timeout=1000);current=price(v)
                     if current:break
                 except:pass
         if current is None:
@@ -219,10 +219,10 @@ def page_product(site,url,title,browser):
 def direct_discover(site,seed,browser):
     ctx=browser.new_context(locale="tr-TR",timezone_id="Europe/Istanbul",user_agent=HEADERS["User-Agent"],viewport={"width":1440,"height":1000},extra_http_headers=HEADERS);page=ctx.new_page()
     try:
-        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});");r=page.goto(seed,wait_until="domcontentloaded",timeout=60000);status=r.status if r else 0;print(f"{site} web HTTP: {status}")
+        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});");r=page.goto(seed,wait_until="domcontentloaded",timeout=25000);status=r.status if r else 0;print(f"{site} web HTTP: {status}")
         if status!=200:return []
-        page.wait_for_timeout(3500)
-        for _ in range(6):page.mouse.wheel(0,3500);page.wait_for_timeout(600)
+        page.wait_for_timeout(1200)
+        for _ in range(2):page.mouse.wheel(0,3500);page.wait_for_timeout(400)
         html=page.content();print(f"{site} HTML={len(html)}")
         if site=="Trendyol":print(f"Trendyol teşhis: -p- sayısı={html.count('-p-')}, productId sayısı={html.count('productId')}")
         return extract_candidate_urls(site,html,seed)
@@ -230,7 +230,7 @@ def direct_discover(site,seed,browser):
     finally:ctx.close()
 
 def telegram(text):
-    r=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",json={"chat_id":CHANNEL_ID,"text":text,"disable_web_page_preview":False},timeout=20)
+    r=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",json={"chat_id":CHANNEL_ID,"text":text,"disable_web_page_preview":False},timeout=15)
     print(f"Telegram send: {r.status_code} | {r.text[:250]}");return r.ok
 
 def format_price(x):return f"{x:,.2f} TL".replace(",","X").replace(".",",").replace("X",".")
@@ -258,7 +258,7 @@ def process(site,p,browser):
 def main():
     print("=== İndirim botu başladı ===")
     try:
-        r=requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe",timeout=20);print(f"Telegram getMe: {r.status_code} | {r.text[:300]}")
+        r=requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe",timeout=15);print(f"Telegram getMe: {r.status_code} | {r.text[:300]}")
     except Exception as e:print(f"Telegram getMe hata: {e}")
     sent=0
     with sync_playwright() as pw:
