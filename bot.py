@@ -14,6 +14,7 @@ MIN_DISCOUNT=10.0; COOLDOWN=12; MAX_PRODUCTS_PER_SITE=2; HISTORY_DAYS=90; MIN_HI
 
 def sb(method,path,**kwargs):
     h={'apikey':SUPABASE_KEY,'Authorization':f'Bearer {SUPABASE_KEY}','Content-Type':'application/json','Accept':'application/json'}
+    if method.upper()=='POST': h['Prefer']='return=representation'
     r=requests.request(method,f'{SUPABASE_URL}/rest/v1/{path}',headers=h,timeout=10,**kwargs)
     if not r.ok: raise RuntimeError(f'Supabase {r.status_code}: {r.text[:300]}')
     return r.json() if r.text else []
@@ -148,7 +149,7 @@ def process(p):
         rows=sb('GET','products',params={'select':'*','product_url':f'eq.{p["url"]}','limit':'1'})
         now=datetime.now(timezone.utc).isoformat();payload={'product_name':p['name'],'current_price':p['price'],'previous_price':p.get('previous'),'product_url':p['url'],'site':p['site'],'updated_at':now}
         if rows:sb('PATCH',f'products?id=eq.{rows[0]["id"]}',json=payload);row=rows[0]
-        else:row=(sb('POST','products',headers={'Prefer':'return=representation'},json=payload) or [payload])[0]
+        else:row=(sb('POST','products',json=payload) or [payload])[0]
         sb('POST','price_history',json={'price':p['price'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
         h=history(p['url']);base=p.get('previous')
         if not base and len(h)>=MIN_HISTORY:base=max(h)
