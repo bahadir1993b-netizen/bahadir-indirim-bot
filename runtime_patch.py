@@ -3,7 +3,7 @@ from pathlib import Path
 p = Path("bot.py")
 s = p.read_text(encoding="utf-8")
 
-# Remove previously injected Akakce function so the patch is idempotent.
+# Remove previously injected Akakce function so this patch is idempotent.
 start = s.find("\ndef akakce_check(")
 if start != -1:
     end = s.find("\ndef process(p):", start)
@@ -11,43 +11,35 @@ if start != -1:
         raise SystemExit("Akakce block end not found")
     s = s[:start] + s[end:]
 
-# Never infer an old price from an arbitrary higher number found on a page.
-s = s.replace(
-    """    if not previous and ps:
+# Never infer historical price from arbitrary higher numbers on a page.
+s = s.replace("""    if not previous and ps:
         higher=[x for x in ps if x>current*1.05]
-        if higher:previous=min(higher)""",
-    """    # Do not infer historical price from unrelated numbers on the page.""",
-    1,
-)
-s = s.replace(
-    """        higher=[x for x in ps if current and x>current*1.05];previous=min(higher) if higher else None""",
-    """        previous=None""",
-    1,
-)
+        if higher:previous=min(higher)""", """    # Do not infer historical price from unrelated numbers on the page.""", 1)
+s = s.replace("""        higher=[x for x in ps if current and x>current*1.05];previous=min(higher) if higher else None""", """        previous=None""", 1)
 
-# Robust Trendyol URL discovery. This uses real newlines, never escaped \n text.
+# Trendyol: explicitly inspect href/url/link values containing -p-NNN.
 needle = """    # Search-engine RSS is XML. Read <link> values explicitly before generic HTML parsing.
 """
-insert = r'''    if site == "Trendyol":
-        for m in re.finditer(r''' + "r'(?:href|url|link)\s*[:=]\s*[\"\']([^\"\']+-p-\d+(?:[/?#][^\"\']*)?)'" + r''', html2, re.I):
+insert = '''    if site == "Trendyol":
+        for m in re.finditer(r"(?:href|url|link)\\s*[:=]\\s*[\\\"']([^\\\"']+-p-\\d+(?:[/?#][^\\\"']*)?)", html2, re.I):
             add(m.group(1))
             if len(out) >= MAX_PRODUCTS_PER_SITE:
                 return out
-        for m in re.finditer(r''' + "r'https?://(?:www\.)?trendyol\.com/[^\"\'<>\s]+-p-\d+(?:[/?#][^\"\'<>\s]*)?'" + r''', html2, re.I):
+        for m in re.finditer(r"https?://(?:www\\.)?trendyol\\.com/[^\\\"'<>\\s]+-p-\\d+(?:[/?#][^\\\"'<>\\s]*)?", html2, re.I):
             add(m.group(0))
             if len(out) >= MAX_PRODUCTS_PER_SITE:
                 return out
 '''
-if needle in s and 'if site == "Trendyol":' not in s:
+if needle in s and 'if site == "Trendyol":\n        for m in re.finditer' not in s:
     s = s.replace(needle, insert + needle, 1)
 
-# Replace page_product with a clean implementation.
+# Replace page_product completely with a clean implementation.
 ps = s.find("\ndef page_product(")
 pe = s.find("\ndef direct_discover(", ps)
 if ps == -1 or pe == -1:
     raise SystemExit("page_product boundaries not found")
-
-page_func = r'''\ndef page_product(site,url,title,browser):
+page_func = '''
+def page_product(site,url,title,browser):
     ctx = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width":1440,"height":1000}, extra_http_headers=HEADERS)
     page = ctx.new_page()
     try:
@@ -90,11 +82,12 @@ page_func = r'''\ndef page_product(site,url,title,browser):
 '''
 s = s[:ps] + page_func + s[pe:]
 
-# Akakce is used only as a current-market comparison source.
-ak = r'''\ndef akakce_check(name,current,browser):
+# Akakce is a current-market reference, not historical price.
+ak = '''
+def akakce_check(name,current,browser):
     try:
         q = re.sub(r"[^0-9A-Za-zÇĞİÖŞÜçğıöşü+ -]", " ", name or "").strip()
-        q = re.sub(r"\s+", " ", q)[:180]
+        q = re.sub(r"\\s+", " ", q)[:180]
         if not q:
             return None
         ctx = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width":1440,"height":1000}, extra_http_headers=HEADERS)
@@ -110,7 +103,7 @@ ak = r'''\ndef akakce_check(name,current,browser):
                 try:
                     h = a.get_attribute("href") or ""
                     t = (a.inner_text() or "").strip()
-                    if re.search(r",\d+\.html(?:$|[?#])", h) and t:
+                    if re.search(r",\\d+\\.html(?:$|[?#])", h) and t:
                         candidates.append((h, t))
                 except Exception:
                     pass
@@ -123,7 +116,7 @@ ak = r'''\ndef akakce_check(name,current,browser):
             if not r or r.status >= 400:
                 return None
             page.wait_for_timeout(1000)
-            text = re.sub(r"\s+", " ", page.locator("body").inner_text(timeout=10000) or "")
+            text = re.sub(r"\\s+", " ", page.locator("body").inner_text(timeout=10000) or "")
             vals = [x for x in prices(text) if x > 50]
             if not vals:
                 return None
@@ -136,14 +129,11 @@ ak = r'''\ndef akakce_check(name,current,browser):
         print(f"Akakce hata: {type(e).__name__}: {e}")
         return None
 '''
-# Convert the raw block's explicit \n markers to actual newlines before insertion.
-ak = ak.replace("\\n", "\n")
 proc = s.find("\ndef process(p):")
 if proc == -1:
     raise SystemExit("process function not found")
 s = s[:proc] + ak + s[proc:]
 
-# Add the market comparison after own historical baseline calculation.
 marker = """    if len(hp)>=MIN_HISTORY_SAMPLES:
         hm=median(hp)
         if hm and hm>current:baseline=max(baseline or 0,hm)
@@ -155,12 +145,7 @@ addition = marker + """    ak=akakce_check(p.get("name"),current,process.browser
 if marker in s and "ak=akakce_check(p.get(\"name\")" not in s:
     s = s.replace(marker, addition, 1)
 
-# Expose the Playwright browser to process().
-s = s.replace(
-    """browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);total=0""",
-    """browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);process.browser=browser;total=0""",
-    1,
-)
+s = s.replace("""browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);total=0""", """browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);process.browser=browser;total=0""", 1)
 
 p.write_text(s, encoding="utf-8")
 print("runtime patch applied: safe robust product extraction")
