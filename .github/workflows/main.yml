@@ -34,6 +34,29 @@ jobs:
         timeout-minutes: 4
         run: python -m playwright install chromium
 
+      - name: Supabase bağlantı testi
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          url = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_KEY"]
+          print(f"Supabase URL: {url}")
+          print(f"Anahtar tipi: {key[:10]}... | uzunluk: {len(key)}")
+          r = requests.get(
+              f"{url}/rest/v1/products?select=id&limit=1",
+              headers={"apikey": key, "Content-Type": "application/json"},
+              timeout=20,
+          )
+          print(f"Supabase HTTP: {r.status_code}")
+          print(f"Supabase cevap: {r.text[:500]}")
+          r.raise_for_status()
+          PY
+
       - name: Botu çalıştır
         timeout-minutes: 5
         env:
