@@ -73,15 +73,12 @@ def record_price(url, site, value, at):
 
 def history(url):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=PRICE_HISTORY_DAYS)).isoformat()
-    return sb_get(
-        "price_history",
-        {
-            "select": "price,recorded_at",
-            "product_url": f"eq.{url}",
-            "recorded_at": f"gte.{cutoff}",
-            "order": "recorded_at.desc",
-        },
-    )
+    return sb_get("price_history", {
+        "select": "price,recorded_at",
+        "product_url": f"eq.{url}",
+        "recorded_at": f"gte.{cutoff}",
+        "order": "recorded_at.desc",
+    })
 
 
 def price(value):
@@ -115,38 +112,12 @@ def prices(text):
 def labeled(text, labels):
     for label in labels:
         m = re.search(
-            re.escape(label) + r"[^0-9]{0,80}(?:₺\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)",
-            text or "",
-            re.I,
+            re.escape(label) + r"[^0-9]{0,100}(?:₺\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)",
+            text or "", re.I,
         )
         if m and (p := price(m.group(1))):
             return p
     return None
-
-
-def hb_prices(text):
-    cur = labeled(text, ["Sepetteki Fiyat", "Sepette indirimli fiyat", "Sepette", "Peşin Fiyat", "Güncel Fiyat", "Satış Fiyatı", "Kampanyalı Fiyat"])
-    if cur is None:
-        candidates = []
-        bad = ["taksit", "puan", "bonus", "parapuan", "kupon kazan", "indirim tutarı", "kazanç"]
-        for m in PRICE_RE.finditer(text or ""):
-            p = price(m.group(1))
-            ctx = text[max(0, m.start() - 160):m.end() + 100].lower()
-            if not p:
-                continue
-            score = (15 if any(x in ctx for x in ["fiyat", "satış", "sepette", "hemen al"]) else 0)
-            score -= 40 if any(x in ctx for x in bad) else 0
-            score -= 10 if p < 50 else 0
-            candidates.append((score, p))
-        if candidates:
-            cur = max(candidates, key=lambda x: (x[0], -x[1]))[1]
-    prev = None
-    for label in ["Eski Fiyat", "Önceki Fiyat", "Liste Fiyatı"]:
-        p = labeled(text, [label])
-        if p and cur and p > cur:
-            prev = p
-            break
-    return cur, prev
 
 
 def canonical(url):
@@ -157,137 +128,107 @@ def canonical(url):
 def product_url(site, path):
     p = (path or "").lower()
     if site == "Amazon":
-        return "/dp/" in p or "/gp/product/" in p or "/gp/aw/d/" in p
-    if site in {"Hepsiburada", "Trendyol"}:
-        return "-p-" in p
+        return bool(re.search(r"/(?:dp|gp/product|gp/aw/d)/[a-z0-9]{6,}", p))
+    if site == "Hepsiburada":
+        return bool(re.search(r"-p-\d+", p))
+    if site == "Trendyol":
+        return bool(re.search(r"-p-\d+", p))
     return False
 
 
-def product(site, name, url, text, cur=None, prev=None):
+def make_product(site, name, url, text, current=None, previous=None):
     url = canonical(url)
     if not product_url(site, urlparse(url).path):
         return None
     text = text or ""
-
-    # FIX: the old one-line conditional had an unclosed parenthesis.
-    if cur is None:
-        if site == "Hepsiburada":
-            cur, prev = hb_prices(text)
-        else:
-            cur = labeled(text, ["Fırsatın Fiyatı", "Teklif Fiyatı", "Sepette", "İndirimli Fiyat", "Güncel Fiyat"])
-            if cur is None:
-                ps = prices(text)
-                cur = ps[0] if ps else None
-
-    if not cur or cur <= 0:
+    if current is None:
+        current = labeled(text, ["Sepette", "İndirimli Fiyat", "Fırsatın Fiyatı", "Teklif Fiyatı", "Güncel Fiyat", "Satış Fiyatı"])
+        if current is None:
+            ps = prices(text)
+            current = ps[0] if ps else None
+    if not current or current <= 0:
         return None
-
+    if previous is None:
+        for label in ["Önceki", "Eski Fiyat", "Liste Fiyatı"]:
+            previous = labeled(text, [label])
+            if previous and previous > current:
+                break
+        else:
+            previous = None
     campaign_price = None
-    coupon_code = None
-    m = re.search(r"(?:sepette|ödemede|ödeme adımında)\s*(?:₺\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
-    if m and (p := price(m.group(1))) and p < cur:
+    m = re.search(r"sepette[^0-9]{0,60}(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)", text, re.I)
+    if m and (p := price(m.group(1))) and p < current:
         campaign_price = p
-
-    m = re.search(r"(?:kod|kupon kodu|kodu)\s*[:：]?\s*([A-Z0-9_-]{4,30})", text, re.I)
+    coupon = None
+    m = re.search(r"(?:kupon kodu|kupon|kod)\s*[:：]?\s*([A-Z0-9_-]{4,30})", text, re.I)
     if m:
-        coupon_code = m.group(1).upper()
-
+        coupon = m.group(1).upper()
     return {
         "name": re.sub(r"\s+", " ", name or "Ürün").strip()[:300],
-        "price": cur,
-        "previous_display_price": prev if prev and prev > cur else None,
+        "price": current,
+        "previous_display_price": previous if previous and previous > current else None,
         "campaign_price": campaign_price,
-        "coupon_code": coupon_code,
+        "coupon_code": coupon,
         "campaign_note": None,
         "url": url,
         "site": site,
     }
 
 
-def amazon_card(a, base):
-    u = canonical(urljoin(base, a.get("href", "")))
-    if not product_url("Amazon", urlparse(u).path):
+def parse_anchor(site, a, base):
+    href = a.get("href", "")
+    if href.startswith("/url?"):
+        qs = parse_qs(urlparse(href).query)
+        href = (qs.get("q") or qs.get("url") or [""])[0]
+    u = canonical(urljoin(base, href))
+    if not product_url(site, urlparse(u).path):
         return None
     node = a
-    best = ""
-    name = a.get("title") or a.get_text(" ", strip=True)
+    best = a.get_text(" ", strip=True)
     for _ in range(5):
+        node = node.parent
         if not node:
             break
         t = node.get_text(" ", strip=True)
         if len(t) > len(best) and len(t) < 1800:
             best = t
-        for img in node.find_all("img"):
-            if img.get("alt") and len(img.get("alt")) > len(name or ""):
-                name = img.get("alt")
-        node = node.parent
     ps = prices(best)
-    cur = labeled(best, ["Fırsatın Fiyatı", "Teklif Fiyatı", "Deal Price", "İndirimli Fiyat", "Şimdi Al"]) or (ps[0] if ps else None)
-    prev = max(ps[1:]) if len(ps) > 1 else None
-    return product("Amazon", name or best[:300], u, best, cur, prev)
-
-
-def card(site, a, base):
-    if site == "Amazon":
-        return amazon_card(a, base)
-    u = canonical(urljoin(base, a.get("href", "")))
-    if not product_url(site, urlparse(u).path):
+    if not ps:
         return None
-    text = a.get_text(" ", strip=True)
-    node = a
-    best = text
-    for _ in range(3):
-        node = node.parent
-        if not node:
-            break
-        t = node.get_text(" ", strip=True)
-        if len(t) > len(best) and len(t) < 1200:
-            best = t
-    if site == "Hepsiburada":
-        cur, prev = hb_prices(best)
-        return product(site, text or best[:300], u, best, cur, prev)
-    cur = labeled(best, ["Sepette", "İndirimli Fiyat"]) or (prices(best)[0] if prices(best) else None)
-    return product(site, text or best[:300], u, best, cur)
+    # Search snippets generally place current price before the crossed/list price.
+    if site == "Amazon":
+        current = labeled(best, ["Fiyat, ürün sayfası", "Fiyat", "Fırsatın Fiyatı"]) or ps[0]
+        previous = None
+        if len(ps) > 1:
+            previous = max(ps[1:])
+    elif site == "Trendyol":
+        current = labeled(best, ["Sepette"]) or ps[0]
+        previous = max(ps[1:]) if len(ps) > 1 else None
+    else:
+        current = labeled(best, ["Sepette", "Peşin Fiyat", "Güncel Fiyat", "Satış Fiyatı"]) or ps[0]
+        previous = max(ps[1:]) if len(ps) > 1 else None
+    name = a.get("title") or a.get_text(" ", strip=True) or best[:300]
+    return make_product(site, name, u, best, current, previous)
 
 
-def google_fallback(site, browser):
+def bing_fallback(site, browser):
     domains = {"Amazon": "amazon.com.tr", "Hepsiburada": "hepsiburada.com", "Trendyol": "trendyol.com"}
     dom = domains[site]
-    out = []
-    seen = set()
+    queries = [f"site:{dom} indirim TL", f"site:{dom} fırsat TL", f"site:{dom} \"Sepette\" TL"]
+    out, seen = [], set()
     ctx = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"])
     page = ctx.new_page()
     try:
-        for q in [f"site:{dom} indirim TL", f"site:{dom} fırsat TL"]:
+        for q in queries:
             try:
-                page.goto("https://www.google.com/search?" + quote("q=" + q + "&hl=tr&gl=tr&num=20", safe="=&"), wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(1000)
+                url = "https://www.bing.com/search?" + quote("q=" + q + "&setlang=tr-tr&count=20", safe="=&")
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(800)
                 soup = BeautifulSoup(page.content(), "html.parser")
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    if href.startswith("/url?"):
-                        qs = parse_qs(urlparse(href).query)
-                        href = (qs.get("q") or qs.get("url") or [""])[0]
-                    if not href.startswith("http") or dom not in urlparse(href).netloc or not product_url(site, urlparse(href).path) or href in seen:
-                        continue
-                    node = a
-                    best = a.get_text(" ", strip=True)
-                    for _ in range(3):
-                        node = node.parent
-                        if not node:
-                            break
-                        t = node.get_text(" ", strip=True)
-                        if len(t) > len(best) and len(t) < 1500:
-                            best = t
-                    ps = prices(best)
-                    if not ps:
-                        continue
-                    if site == "Hepsiburada":
-                        cur, prev = hb_prices(best)
-                    else:
-                        cur, prev = ps[-1], (max(ps[:-1]) if len(ps) > 1 else None)
-                    p = product(site, a.get_text(" ", strip=True) or best[:300], href, best, cur, prev)
-                    if p:
+                anchors = soup.select("li.b_algo h2 a") or soup.find_all("a", href=True)
+                for a in anchors:
+                    p = parse_anchor(site, a, page.url)
+                    if p and p["url"] not in seen:
                         out.append(p)
                         seen.add(p["url"])
                     if len(out) >= MAX_PRODUCTS_PER_SITE:
@@ -295,47 +236,17 @@ def google_fallback(site, browser):
                 if len(out) >= MAX_PRODUCTS_PER_SITE:
                     break
             except Exception as e:
-                print(f"{site} Google fallback: {type(e).__name__}: {e}")
+                print(f"{site} Bing fallback: {type(e).__name__}: {e}")
     finally:
         ctx.close()
-    print(f"{site} Google fallback: {len(out)} ürün bulundu")
+    print(f"{site} Bing fallback: {len(out)} ürün bulundu")
     return out
 
 
-def trendyol_api():
-    endpoint = "https://public.trendyol.com/discovery-web-searchgw-service/v2/api/infinite-scroll/sr"
-    params = {"q": "indirim", "os": "1", "sk": "1", "pi": "1", "culture": "tr-TR", "userGenderId": "1", "pId": "0"}
-    try:
-        r = session.get(endpoint, params=params, timeout=25)
-        r.raise_for_status()
-        items = (r.json().get("result") or {}).get("products") or []
-    except Exception as e:
-        print(f"Trendyol API: {type(e).__name__}: {e}")
-        return []
-    out = []
-    for x in items:
-        u = x.get("url") or x.get("productUrl")
-        cid = x.get("id") or x.get("contentId")
-        u = u or (f"https://www.trendyol.com/urun-p-{cid}" if cid else None)
-        cur = price(x.get("price") or x.get("discountedPrice") or x.get("sellingPrice"))
-        prev = price(x.get("originalPrice") or x.get("listPrice"))
-        if u and cur:
-            p = product("Trendyol", x.get("name") or x.get("title") or "Trendyol ürünü", u, json.dumps(x, ensure_ascii=False), cur, prev)
-            if p:
-                out.append(p)
-        if len(out) >= MAX_PRODUCTS_PER_SITE:
-            break
-    print(f"Trendyol API: {len(out)} ürün bulundu")
-    return out
-
-
-def discover(site, seed, browser):
+def direct_discover(site, seed, browser):
     ctx = browser.new_context(
-        locale="tr-TR",
-        timezone_id="Europe/Istanbul",
-        user_agent=HEADERS["User-Agent"],
-        viewport={"width": 1440, "height": 1000},
-        extra_http_headers=HEADERS,
+        locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"],
+        viewport={"width": 1440, "height": 1000}, extra_http_headers=HEADERS,
     )
     page = ctx.new_page()
     try:
@@ -343,32 +254,35 @@ def discover(site, seed, browser):
         r = page.goto(seed, wait_until="domcontentloaded", timeout=60000)
         status = r.status if r else 0
         print(f"{site} web HTTP: {status}")
-        if status == 200:
-            page.wait_for_timeout(2000)
-            for _ in range(3):
-                page.mouse.wheel(0, 2500)
-                page.wait_for_timeout(500)
-            soup = BeautifulSoup(page.content(), "html.parser")
-            out = []
-            seen = set()
-            for a in soup.find_all("a", href=True):
-                p = card(site, a, page.url)
-                if p and p["url"] not in seen:
-                    out.append(p)
-                    seen.add(p["url"])
-                if len(out) >= MAX_PRODUCTS_PER_SITE:
-                    break
-            if out:
-                print(f"{site} web: {len(out)} ürün bulundu")
-                return out
+        if status != 200:
+            return []
+        page.wait_for_timeout(2500)
+        for _ in range(4):
+            page.mouse.wheel(0, 3000)
+            page.wait_for_timeout(700)
+        soup = BeautifulSoup(page.content(), "html.parser")
+        out, seen = [], set()
+        for a in soup.find_all("a", href=True):
+            p = parse_anchor(site, a, page.url)
+            if p and p["url"] not in seen:
+                out.append(p)
+                seen.add(p["url"])
+            if len(out) >= MAX_PRODUCTS_PER_SITE:
+                break
+        print(f"{site} web: {len(out)} ürün bulundu")
+        return out
     except Exception as e:
         print(f"{site} web: {type(e).__name__}: {e}")
+        return []
     finally:
         ctx.close()
 
-    if site == "Trendyol":
-        return trendyol_api() or google_fallback(site, browser)
-    return google_fallback(site, browser)
+
+def discover(site, seed, browser):
+    out = direct_discover(site, seed, browser)
+    if out:
+        return out
+    return bing_fallback(site, browser)
 
 
 def telegram(text):
@@ -410,9 +324,9 @@ def process(p):
     saved = sb_upsert(row)
     record_price(url, p["site"], current, now.isoformat())
 
-    last_posted = saved.get("last_posted_at") if isinstance(saved, dict) else None
     if discount < MIN_DISCOUNT:
         return False
+    last_posted = saved.get("last_posted_at") if isinstance(saved, dict) else None
     if last_posted:
         try:
             last_dt = datetime.fromisoformat(last_posted.replace("Z", "+00:00"))
@@ -421,10 +335,9 @@ def process(p):
         except Exception:
             pass
 
-    old_text = f"{baseline:,.2f} TL" if baseline else ""
     msg = f"🔥 %{discount:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {current:,.2f} TL"
-    if old_text:
-        msg += f"\n🏷️ Önce: {old_text}"
+    if baseline:
+        msg += f"\n🏷️ Önce: {baseline:,.2f} TL"
     if p.get("campaign_price"):
         msg += f"\n🛒 Sepette: {p['campaign_price']:,.2f} TL"
     if p.get("coupon_code"):
@@ -432,7 +345,6 @@ def process(p):
     msg += f"\n\n🛍️ {p['site']}\n🔗 {p['url']}"
     telegram(msg)
 
-    # Update posting timestamp without depending on a dedicated helper.
     requests.patch(
         f"{SUPABASE_URL}/rest/v1/products",
         headers={**sb_headers(), "Prefer": "return=minimal"},
