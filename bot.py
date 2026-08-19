@@ -47,8 +47,8 @@ def supabase_headers(prefer=None):
     return headers
 
 
-def supabase_get(query):
-    r = requests.get(f"{SUPABASE_URL}/rest/v1/{query}", headers=supabase_headers(), timeout=20)
+def supabase_get(path, params=None):
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{path}", headers=supabase_headers(), params=params, timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -67,10 +67,7 @@ def record_price(url, site, price, recorded_at):
 
 def get_price_history(url, days=PRICE_HISTORY_DAYS):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    encoded_url = requests.utils.quote(url, safe="")
-    encoded_cutoff = requests.utils.quote(cutoff, safe="")
-    query = f"price_history?select=price,recorded_at&product_url=eq.{encoded_url}&recorded_at=gte.{encoded_cutoff}&order=recorded_at.desc"
-    return supabase_get(query)
+    return supabase_get("price_history", params={"select": "price,recorded_at", "product_url": f"eq.{url}", "recorded_at": f"gte.{cutoff}", "order": "recorded_at.desc"})
 
 
 def clean_price(value):
@@ -139,7 +136,6 @@ def likely_product_url(site, path):
     if site == "Trendyol":
         return "-p-" in p and len(p.strip("/")) > 10
     if site == "Pazarama":
-        # Pazarama ürün URL'leri çoğunlukla tek path segmentinde ...-p-<ürünId> şeklinde.
         return "-p-" in p and bool(re.search(r"-p-\d+", p))
     return False
 
@@ -176,8 +172,6 @@ def card_product(site, a, base_url):
         prices = prices_from_text(best)
         if not prices:
             return None
-        # Pazarama kartlarında "Son 30 Günün En Düşük Fiyatı X TL ... Y TL"
-        # biçimi çok yaygın. X tarihsel düşük, Y güncel satış/sepet fiyatıdır.
         current = prices[-1]
         previous = None
         low_match = re.search(r"Son\s+30\s+Günün\s+En\s+Düşük\s+Fiyatı", best, re.I)
@@ -202,8 +196,6 @@ def card_product(site, a, base_url):
 
 
 def prepare_page(page, site):
-    # Trendyol'da önce ana TR storefront'una girerek ülke/yerel storefront bilgisinin
-    # oturumda oluşmasına izin veriyoruz. Seed URL de /tr/ ile başlıyor.
     if site == "Trendyol":
         try:
             page.goto("https://www.trendyol.com/", wait_until="domcontentloaded", timeout=45000)
@@ -214,32 +206,18 @@ def prepare_page(page, site):
 
 
 def discover(site, seed_url, browser):
-    context = browser.new_context(
-        locale="tr-TR",
-        timezone_id="Europe/Istanbul",
-        user_agent=HEADERS["User-Agent"],
-        viewport={"width": 1440, "height": 1000},
-        extra_http_headers=HEADERS,
-    )
+    context = browser.new_context(locale="tr-TR", timezone_id="Europe/Istanbul", user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1000}, extra_http_headers=HEADERS)
     page = context.new_page()
     try:
-        # Basit otomasyon izlerini azalt; gerçek fiyat/ürün verisini değiştirmez.
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         prepare_page(page, site)
-
         print(f"Tarayıcı açılıyor: {seed_url}")
         response = page.goto(seed_url, wait_until="domcontentloaded", timeout=60000)
         status = response.status if response else "?"
         print(f"Sayfa HTTP: {status} | URL: {page.url}")
 
-        # Hepsiburada kampanya endpoint'i 403 verirse ana storefront ve ürün odaklı
-        # bir sayfayı aynı oturumla deniyoruz. GitHub Actions IP'si yine bloklanırsa
-        # logda açıkça görülecek.
         if site == "Hepsiburada" and status == 403:
-            for fallback in [
-                "https://www.hepsiburada.com/aradiginburada",
-                "https://www.hepsiburada.com/premium-kupon",
-            ]:
+            for fallback in ["https://www.hepsiburada.com/aradiginburada", "https://www.hepsiburada.com/premium-kupon"]:
                 print(f"Hepsiburada fallback deneniyor: {fallback}")
                 try:
                     response = page.goto(fallback, wait_until="domcontentloaded", timeout=45000)
@@ -291,8 +269,7 @@ def discover(site, seed_url, browser):
 
 
 def get_existing(url):
-    encoded = requests.utils.quote(url, safe="")
-    return supabase_get(f"products?select=*&product_url=eq.{encoded}")[0:1]
+    return supabase_get("products", params={"select": "*", "product_url": f"eq.{url}", "limit": "1"})
 
 
 def send_telegram(text):
@@ -322,7 +299,7 @@ def process(product):
     last_history_price = history_prices[0] if history_prices else None
     if last_history_price is None or abs(last_history_price - current) >= 0.01:
         record_price(url, product["site"], current, now.isoformat())
-        history_prices.append(current)
+        history_prices.insert(0, current)
 
     history_ready = len(history_prices) >= MIN_HISTORY_SAMPLES
     reference_price = median(history_prices) if history_ready else None
