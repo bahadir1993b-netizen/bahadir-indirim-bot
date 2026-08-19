@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from playwright.sync_api import sync_playwright
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
 TOKEN=os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL_ID="-1004424116637"
 SUPABASE_URL=os.environ["SUPABASE_URL"].rstrip("/")
@@ -18,112 +17,83 @@ REPOST_COOLDOWN_HOURS=12
 MAX_PRODUCTS_PER_SITE=12
 PRICE_HISTORY_DAYS=90
 MIN_HISTORY_SAMPLES=3
-
-# Supabase kolonlari projeden otomatik kesfedilir; boylece schema'ya olmayan alanlari POST etmeyiz.
 _products_columns=None
 _history_columns=None
 
 def sb_headers(prefer=None):
     h={"apikey":SUPABASE_KEY,"Content-Type":"application/json","Accept":"application/json"}
     if SUPABASE_KEY.startswith("eyJ"): h["Authorization"]=f"Bearer {SUPABASE_KEY}"
-    if prefer: h["Prefer"]=prefer
+    if prefer:h["Prefer"]=prefer
     return h
 
 def sb_get(path,params=None):
     r=requests.get(f"{SUPABASE_URL}/rest/v1/{path}",headers=sb_headers(),params=params,timeout=20)
-    if r.status_code>=400: raise requests.HTTPError(f"{r.status_code} {r.text[:500]}",response=r)
+    if r.status_code>=400:raise requests.HTTPError(f"{r.status_code} {r.text[:500]}",response=r)
     return r.json()
 
 def schema_columns(table):
     try:
         rows=sb_get(table,{"select":"*","limit":"1"})
-        if rows:
-            return set(rows[0].keys())
+        return set(rows[0].keys()) if rows else set()
     except Exception as e:
-        print(f"Supabase {table} kolon kesfi hatasi: {e}")
-    return set()
+        print(f"Supabase {table} kolon kesfi hatasi: {e}");return set()
 
 def get_product_columns():
     global _products_columns
-    if _products_columns is None:
-        _products_columns=schema_columns("products")
-        print(f"Supabase products kolonlari: {sorted(_products_columns)}")
+    if _products_columns is None:_products_columns=schema_columns("products");print(f"Supabase products kolonlari: {sorted(_products_columns)}")
     return _products_columns
 
 def get_history_columns():
     global _history_columns
-    if _history_columns is None:
-        _history_columns=schema_columns("price_history")
-        print(f"Supabase price_history kolonlari: {sorted(_history_columns)}")
+    if _history_columns is None:_history_columns=schema_columns("price_history");print(f"Supabase price_history kolonlari: {sorted(_history_columns)}")
     return _history_columns
 
-def compatible_payload(payload,columns):
-    if not columns:return payload
-    return {k:v for k,v in payload.items() if k in columns}
+def compatible_payload(payload,columns):return payload if not columns else {k:v for k,v in payload.items() if k in columns}
 
 def sb_upsert(p):
-    url=p.get("url")
-    if not url: raise ValueError("product url missing")
-    existing=sb_get("products",{"select":"*","product_url":f"eq.{url}","limit":"1"})
-    cols=get_product_columns()
+    url=p["url"];existing=sb_get("products",{"select":"*","product_url":f"eq.{url}","limit":"1"});cols=get_product_columns()
     if existing:
-        row=existing[0];rid=row.get("id")
-        if rid is not None:
-            payload=compatible_payload(dict(p),cols)
-            payload.pop("url",None)
-            if payload:
-                r=requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers("return=representation"),json=payload,timeout=20)
-                if r.ok:
-                    d=r.json();return d[0] if d else row
-                print(f"Supabase PATCH basarisiz: HTTP {r.status_code} | {r.text[:500]}")
+        row=existing[0];rid=row.get("id");payload=compatible_payload(dict(p),cols);payload.pop("url",None)
+        if rid is not None and payload:
+            r=requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers("return=representation"),json=payload,timeout=20)
+            if r.ok:
+                d=r.json();return d[0] if d else row
         return row
-    raw=dict(p);raw["product_url"]=raw.get("url");raw.pop("url",None)
-    payload=compatible_payload(raw,cols)
-    if not payload:
-        # Tablo bos ise kolon kesfi bos doner; onceki bilinen minimum alanlarla dene.
-        payload={"product_url":url,"site":p.get("site"),"price":p.get("price")}
+    raw=dict(p);raw["product_url"]=raw.pop("url");payload=compatible_payload(raw,cols) or {"product_url":url,"site":p.get("site"),"price":p.get("price")}
     r=requests.post(f"{SUPABASE_URL}/rest/v1/products",headers=sb_headers("return=representation"),json=payload,timeout=20)
-    if r.ok:
-        d=r.json();return d[0] if d else payload
-    raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:500]}",response=r)
+    if not r.ok:raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:500]}",response=r)
+    d=r.json();return d[0] if d else payload
 
 def record_price(url,site,value,at):
-    cols=get_history_columns()
-    payload={"product_url":url,"site":site,"price":value,"observed_at":at,"recorded_at":at,"created_at":at}
-    payload=compatible_payload(payload,cols)
-    if not payload:
-        payload={"product_url":url,"site":site,"price":value}
+    cols=get_history_columns();payload=compatible_payload({"product_url":url,"site":site,"price":value,"observed_at":at,"recorded_at":at,"created_at":at},cols) or {"product_url":url,"site":site,"price":value}
     r=requests.post(f"{SUPABASE_URL}/rest/v1/price_history",headers=sb_headers("return=minimal"),json=payload,timeout=20)
-    if not r.ok:raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:500]}",response=r)
+    if not r.ok:print(f"Supabase price_history yazilamadi: {r.status_code} {r.text[:300]}")
 
 def history(url):
-    cutoff=(datetime.now(timezone.utc)-timedelta(days=PRICE_HISTORY_DAYS)).isoformat()
-    cols=get_history_columns()
-    time_key=next((x for x in ("observed_at","recorded_at","created_at") if x in cols),None)
-    if time_key:
-        try:return sb_get("price_history",{"select":f"price,{time_key}","product_url":f"eq.{url}",time_key:f"gte.{cutoff}","order":f"{time_key}.desc"})
-        except requests.HTTPError as e:print(f"Supabase history {time_key} kullanilamadi: {e}")
-    try:return sb_get("price_history",{"select":"price","product_url":f"eq.{url}"})
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=PRICE_HISTORY_DAYS)).isoformat();cols=get_history_columns();tk=next((x for x in ("observed_at","recorded_at","created_at") if x in cols),None)
+    try:
+        p={"select":"price"+(f",{tk}" if tk else ""),"product_url":f"eq.{url}"}
+        if tk:p[tk]=f"gte.{cutoff}"
+        return sb_get("price_history",p)
     except Exception as e:print(f"Supabase history okunamadi: {e}");return []
 
 def price(v):
     if v is None:return None
-    s=str(v).replace("TL","").replace("₺","").replace(" ",""); s=re.sub(r"[^0-9,.]","",s)
+    s=str(v).replace("TL","").replace("₺","").replace(" ","");s=re.sub(r"[^0-9,.]","",s)
     if not s:return None
     if "," in s and "." in s:s=s.replace(".","").replace(",",".") if s.rfind(",")>s.rfind(".") else s.replace(",","")
     elif "," in s:
-        a,b=s.rsplit(",",1); s=a.replace(".","")+"."+b if len(b)<=2 else s.replace(",","")
+        a,b=s.rsplit(",",1);s=a.replace(".","")+"."+b if len(b)<=2 else s.replace(",","")
     elif "." in s:
-        a,b=s.rsplit(".",1); s=s.replace(".","") if len(b)>2 else s
+        a,b=s.rsplit(".",1);s=s.replace(".","") if len(b)>2 else s
     try:return float(s)
     except:return None
 
 PRICE_RE=re.compile(r"(?:₺\s*)?(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)",re.I)
-
 def prices(text):
     out=[]
     for m in PRICE_RE.finditer(text or ""):
-        if "%" in (text[max(0,m.start()-3):m.start()]):continue
+        if "%" in text[max(0,m.start()-3):m.start()]:continue
         p=price(m.group(1))
         if p and p>0:out.append(p)
     return out
@@ -137,50 +107,56 @@ def labeled(text,labels):
     return None
 
 def canonical(url):
-    url=unquote(url or "").replace("\\/","/").strip().strip('"\'')
-    p=urlparse(url)
+    url=unquote(url or "").replace("\\/","/").strip().strip("\"'");p=urlparse(url)
     return urlunparse((p.scheme or "https",p.netloc.lower(),p.path.rstrip("/"),"","",""))
 
 def product_url(site,url):
-    u=unquote(url or "").replace("\\/","/")
-    p=urlparse(u).path.lower() if "://" in u else u.lower()
-    if site=="Amazon":return bool(re.search(r"/(?:dp|gp/product|gp/aw/d|product)/[a-z0-9]{8,}(?:$|[/?#])",p,re.I))
-    if site=="Hepsiburada":return bool(re.search(r"-p-[a-z0-9]+(?:$|[/?#])",p,re.I))
-    if site=="Trendyol":return bool(re.search(r"-p-\d+(?:$|[/?#])",p,re.I))
+    p=urlparse(unquote(url or "").replace("\\/","/")).path.lower()
+    if site=="Amazon":return bool(re.search(r"/(?:dp|gp/product|gp/aw/d|product)/[a-z0-9]{8,}(?:$|/)",p,re.I))
+    if site=="Hepsiburada":return bool(re.search(r"-p-[a-z0-9]+(?:$|/)",p,re.I))
+    if site=="Trendyol":return bool(re.search(r"-p-\d+(?:$|/)",p,re.I))
     return False
 
 def unwrap(url):
-    url=unquote(url or "").replace("\\/","/")
-    q=parse_qs(urlparse(url).query)
+    url=unquote(url or "").replace("\\/","/");q=parse_qs(urlparse(url).query)
     for k in ("q","url","uddg","u"):
         if q.get(k) and q[k][0].startswith("http"):return unquote(q[k][0])
     return url
 
 def extract_candidate_urls(site,html,base):
-    html=html or "";html2=html.replace("\\/","/").replace("\\u002F","/").replace("\\u003A",":");soup=BeautifulSoup(html,"html.parser");out=[];seen=set()
-    def add(raw,title=""):
-        raw=unwrap(raw).replace("\\/","/")
+    html2=(html or "").replace("\\/","/").replace("\\u002F","/").replace("\\u003A",":");soup=BeautifulSoup(html2,"html.parser");out=[];seen=set()
+    def add(raw,title="Ürün"):
+        raw=unwrap(raw).strip('"\'')
         if not raw:return
         u=canonical(urljoin(base,raw))
-        if product_url(site,u) and u not in seen:
-            seen.add(u);out.append((u,(title or "Ürün").strip()[:300]))
-    if "<rss" in html2[:1000].lower() or "<item>" in html2.lower():
-        try:
-            xs=BeautifulSoup(html2,"xml")
-            for item in xs.find_all("item"):
-                link=item.find("link");title=item.find("title")
-                if link and link.get_text(strip=True):add(link.get_text(strip=True),title.get_text(" ",strip=True) if title else "Ürün")
-        except Exception as e:print(f"RSS ayrıştırma uyarısı: {e}")
+        if product_url(site,u) and u not in seen:seen.add(u);out.append((u,re.sub(r"\s+"," ",title or "Ürün").strip()[:300]))
     for a in soup.find_all("a",href=True):
         add(a.get("href"),a.get("title") or a.get("aria-label") or a.get_text(" ",strip=True))
         if len(out)>=MAX_PRODUCTS_PER_SITE:return out
     domain={"Amazon":"amazon.com.tr","Hepsiburada":"hepsiburada.com","Trendyol":"trendyol.com"}[site]
-    patterns=[rf"https?://(?:www\.)?{re.escape(domain)}[^\"'<>\\s]+",rf"(?:https?:)?//(?:www\.)?{re.escape(domain)}[^\"'<>\\s]+",rf"/(?:[^\"'<>\\s]+)-p-[A-Za-z0-9]+(?:[/?#][^\"'<>\\s]*)?",r"/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}(?:[/?#][^\"'<>\\s]*)?"]
-    for pat in patterns:
+    pats=[]
+    if site=="Amazon":pats=[rf"https?://(?:www\.)?{re.escape(domain)}[^\"'<>\s]+",r"/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}(?:[^\"'<>\s]*)"]
+    elif site=="Trendyol":pats=[r"(?:https?:)?//(?:www\.)?trendyol\.com/[^\"'<>\s]+?-p-\d+[^\"'<>\s]*",r"/[^\"'<>\s]+?-p-\d+[^\"'<>\s]*"]
+    else:pats=[r"(?:https?:)?//(?:www\.)?hepsiburada\.com/[^\"'<>\s]+?-p-[A-Za-z0-9]+[^\"'<>\s]*",r"/[^\"'<>\s]+?-p-[A-Za-z0-9]+[^\"'<>\s]*"]
+    for pat in pats:
         for m in re.finditer(pat,html2,re.I):
             add(m.group(0))
             if len(out)>=MAX_PRODUCTS_PER_SITE:return out
+    print(f"{site} aday regex eslesmesi: {len(out)}")
     return out
+
+def search_fallback(site,browser):
+    q=quote(f"site:{'hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com'} -p-")
+    urls=[f"https://www.bing.com/search?q={q}",f"https://www.google.com/search?q={q}"]
+    for u in urls:
+        try:
+            r=requests.get(u,headers=HEADERS,timeout=20)
+            print(f"{site} arama {urlparse(u).netloc} HTTP: {r.status_code}")
+            if r.status_code==200:
+                got=extract_candidate_urls(site,r.text,u)
+                if got:return got
+        except Exception as e:print(f"{site} arama hata: {type(e).__name__}: {e}")
+    return []
 
 def parse_jsonld(html):
     res={};soup=BeautifulSoup(html or "","html.parser")
@@ -218,9 +194,25 @@ def page_product(site,url,title,browser):
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});");r=page.goto(url,wait_until="domcontentloaded",timeout=30000)
         if not r or r.status>=400:return None
         page.wait_for_timeout(1800);html=page.content();text=page.locator("body").inner_text(timeout=10000);jd=parse_jsonld(html)
-        current=jd.get("price") or labeled(text,["Sepetteki Fiyat","Sepette","İndirimli Fiyat","Satış Fiyatı","Güncel Fiyat","Fiyat"]);ps=prices(text)
-        if current is None and ps:current=ps[0]
-        return make_product(site,jd.get("name") or title,url,text,current,None) or make_product(site,title,url,text,current,None)
+        current=jd.get("price") or labeled(text,["Sepetteki Fiyat","Sepette","İndirimli Fiyat","Satış Fiyatı","Güncel Fiyat","Fiyat"])
+        if site=="Amazon" and current is None:
+            for sel in [".a-price .a-offscreen","#corePrice_feature_div .a-offscreen","#priceblock_ourprice","#priceblock_dealprice",".apexPriceToPay .a-offscreen","[data-a-color='price'] .a-offscreen"]:
+                try:
+                    v=page.locator(sel).first.inner_text(timeout=1500);current=price(v)
+                    if current:break
+                except:pass
+        if current is None:
+            ps=prices(text);current=min(ps) if ps else None
+        title2=jd.get("name")
+        if not title2:
+            try:title2=page.locator("meta[property='og:title']").get_attribute("content")
+            except:pass
+        if not title2:
+            try:title2=page.title()
+            except:pass
+        p=make_product(site,title2 or title,url,text,current,None)
+        if p:print(f"{site} ÜRÜN: {p['price']:.2f} TL | {p['name'][:80]}")
+        return p
     except Exception as e:print(f"{site} ürün sayfası hata: {type(e).__name__}: {e}");return None
     finally:ctx.close()
 
@@ -231,86 +223,58 @@ def direct_discover(site,seed,browser):
         if status!=200:return []
         page.wait_for_timeout(3500)
         for _ in range(6):page.mouse.wheel(0,3500);page.wait_for_timeout(600)
-        html=page.content()
-        if site=="Trendyol":print(f"Trendyol teşhis: -p- sayısı={html.lower().count('-p-')}, productId sayısı={len(re.findall(r'productid',html,re.I))}")
-        c=extract_candidate_urls(site,html,page.url);print(f"{site} web: {len(c)} ürün linki bulundu; HTML={len(html)}")
-        return c
-    except Exception as e:print(f"{site} web: {type(e).__name__}: {e}");return []
+        html=page.content();print(f"{site} HTML={len(html)}")
+        if site=="Trendyol":print(f"Trendyol teşhis: -p- sayısı={html.count('-p-')}, productId sayısı={html.count('productId')}")
+        return extract_candidate_urls(site,html,seed)
+    except Exception as e:print(f"{site} discover hata: {type(e).__name__}: {e}");return []
     finally:ctx.close()
 
-def search_engine_candidates(site):
-    dom={"Amazon":"amazon.com.tr","Hepsiburada":"hepsiburada.com","Trendyol":"trendyol.com"}[site];found=[];seen=set()
-    for q in [f"site:{dom} indirim TL",f"site:{dom} fırsat TL",f"site:{dom} kampanya TL"]:
-        eq=quote(q,safe="");urls=[f"https://www.bing.com/search?format=rss&q={eq}",f"https://html.duckduckgo.com/html/?q={eq}",f"https://www.google.com/search?q={eq}&hl=tr&num=20"]
-        for u in urls:
-            try:
-                r=requests.get(u,headers=HEADERS,timeout=15);print(f"{site} arama HTTP: {r.status_code}")
-                if r.status_code>=400:continue
-                for c in extract_candidate_urls(site,r.text,u):
-                    if c[0] not in seen:seen.add(c[0]);found.append(c)
-                if len(found)>=MAX_PRODUCTS_PER_SITE:return found[:MAX_PRODUCTS_PER_SITE]
-            except Exception as e:print(f"{site} arama hata: {type(e).__name__}: {e}")
-    return found[:MAX_PRODUCTS_PER_SITE]
-
-def discover(site,seed,browser):
-    c=direct_discover(site,seed,browser)
-    if not c:
-        c=search_engine_candidates(site);print(f"{site} arama fallback: {len(c)} ürün linki bulundu")
-    products=[]
-    for u,t in c:
-        p=page_product(site,u,t,browser)
-        if p:products.append(p);print(f"{site} ÜRÜN: {p['price']:.2f} TL | {p['name'][:90]}")
-        if len(products)>=MAX_PRODUCTS_PER_SITE:break
-    print(f"{site}: {len(products)} fiyatlı ürün bulundu");return products
-
 def telegram(text):
-    r=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",json={"chat_id":CHANNEL_ID,"text":text,"disable_web_page_preview":False},timeout=20);print(f"Telegram HTTP: {r.status_code} | {r.text[:300]}");r.raise_for_status()
+    r=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",json={"chat_id":CHANNEL_ID,"text":text,"disable_web_page_preview":False},timeout=20)
+    print(f"Telegram send: {r.status_code} | {r.text[:250]}");return r.ok
 
-def median(v):
-    v=sorted(v);n=len(v);return None if not v else v[n//2] if n%2 else (v[n//2-1]+v[n//2])/2
+def format_price(x):return f"{x:,.2f} TL".replace(",","X").replace(".",",").replace("X",".")
 
-def process(p):
-    now=datetime.now(timezone.utc);url=p["url"];current=float(p["price"]);hist=history(url);hp=[float(x["price"]) for x in hist if x.get("price") is not None]
-    baseline=float(p["previous_display_price"]) if p.get("previous_display_price") and float(p["previous_display_price"])>current else None
-    if len(hp)>=MIN_HISTORY_SAMPLES:
-        hm=median(hp)
-        if hm and hm>current:baseline=max(baseline or 0,hm)
-    discount=((baseline-current)/baseline*100) if baseline and baseline>current else 0
-    print(f"DEĞERLENDİR: {p['site']} | {current:.2f} TL | baz={baseline} | indirim=%{discount:.1f}")
-    row=dict(p);row.update({"price":current,"discount_percent":round(discount,2),"last_seen_at":now.isoformat()})
-    try:saved=sb_upsert(row)
-    except Exception as e:print(f"Supabase products son hata: {type(e).__name__}: {e}");saved=p
-    try:record_price(url,p["site"],current,now.isoformat())
-    except Exception as e:print(f"Supabase price_history son hata: {type(e).__name__}: {e}")
-    if discount<MIN_DISCOUNT:return False
-    last=saved.get("last_posted_at")
-    if last:
-        try:
-            if now-datetime.fromisoformat(last.replace("Z","+00:00"))<timedelta(hours=REPOST_COOLDOWN_HOURS):return False
-        except:pass
-    msg=f"🔥 %{discount:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {current:,.2f} TL\n🏷️ Önce: {baseline:,.2f} TL\n🛍️ {p['site']}\n🔗 {url}"
-    if p.get("campaign_price"):msg+=f"\n🛒 Sepette: {p['campaign_price']:,.2f} TL"
-    if p.get("coupon_code"):msg+=f"\n🎟️ Kupon: {p['coupon_code']}"
-    telegram(msg)
-    return True
-
-def telegram_check():
-    r=requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe",timeout=20);print(f"Telegram getMe: {r.status_code} | {r.text[:250]}");r.raise_for_status()
+def process(site,p,browser):
+    try:
+        row=sb_upsert(p);record_price(p["url"],site,p["price"],datetime.now(timezone.utc).isoformat())
+        hs=history(p["url"]);vals=[price(x.get("price")) for x in hs];vals=[x for x in vals if x]
+        baseline=p.get("previous_display_price")
+        if len(vals)>=MIN_HISTORY_SAMPLES:
+            hist=min(vals);baseline=hist if baseline is None else min(baseline,hist)
+        if not baseline or baseline<=p["price"]:return False
+        discount=(baseline-p["price"])/baseline*100
+        if discount<MIN_DISCOUNT:return False
+        msg=f"🔥 %{discount:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {format_price(p['price'])}\n🏷️ Önce: {format_price(baseline)}\n🛍️ {site} 🔗 {p['url']}"
+        if telegram(msg):
+            cols=get_product_columns();rid=row.get("id") if isinstance(row,dict) else None
+            if rid is not None and "last_posted_at" in cols:
+                try:requests.patch(f"{SUPABASE_URL}/rest/v1/products?id=eq.{rid}",headers=sb_headers(),json={"last_posted_at":datetime.now(timezone.utc).isoformat()},timeout=10)
+                except:pass
+            return True
+    except Exception as e:print(f"{site} ürün işleme hata: {type(e).__name__}: {e}")
+    return False
 
 def main():
     print("=== İndirim botu başladı ===")
-    telegram_check()
+    try:
+        r=requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe",timeout=20);print(f"Telegram getMe: {r.status_code} | {r.text[:300]}")
+    except Exception as e:print(f"Telegram getMe hata: {e}")
+    sent=0
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True,args=["--disable-blink-features=AutomationControlled","--no-sandbox"]);total=0
+        browser=pw.chromium.launch(headless=True)
         for site,seed in SEEDS.items():
-            try:
-                products=discover(site,seed,browser)
-                for p in products:
-                    try:
-                        if process(p):total+=1
-                    except Exception as e:print(f"{site} işleme hata: {type(e).__name__}: {e}")
-            except Exception as e:print(f"{site} genel hata: {type(e).__name__}: {e}")
+            links=direct_discover(site,seed,browser)
+            if not links and site in ("Hepsiburada","Trendyol"):links=search_fallback(site,browser)
+            print(f"{site}: {len(links)} ürün linki bulundu")
+            found=0
+            for url,title in links[:MAX_PRODUCTS_PER_SITE]:
+                p=page_product(site,url,title,browser)
+                if p:
+                    found+=1
+                    if process(site,p,browser):sent+=1
+            print(f"{site}: {found} fiyatlı ürün bulundu")
         browser.close()
-    print(f"=== Bitti. Gönderilen: {total} ===")
+    print(f"=== Bitti. Gönderilen: {sent} ===")
 
 if __name__=="__main__":main()
