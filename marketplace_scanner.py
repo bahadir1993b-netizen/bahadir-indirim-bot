@@ -48,8 +48,7 @@ def prices(text,contextual=True):
   if not x:continue
   if contextual:
    ctx=(text[max(0,m.start()-42):min(len(text),m.end()+42)] or '')
-   if BAD_PRICE_CONTEXT.search(ctx):
-    continue
+   if BAD_PRICE_CONTEXT.search(ctx): continue
   out.append(x)
  return out
 
@@ -131,30 +130,67 @@ def verify(page,site,u,fallback_title,expected_current,expected_previous):
   if not title:title=(soup.title.get_text(' ',strip=True) if soup.title else fallback_title)
   image=(soup.select_one('meta[property="og:image"]') or soup.select_one('meta[name="twitter:image"]'))
   image=image.get('content','').strip() if image else None
-  current_vals=[]; old=[]
+
+  # ÜRÜN FİYATI: önce yapılandırılmış gerçek satış fiyatlarını oku.
+  current_vals=[]
   for sel in ['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]','[data-price]']:
    for e in soup.select(sel):
     x=money(e.get('content') or e.get('value') or e.get('data-price') or e.get_text(' ',strip=True))
     if x:current_vals.append(x)
-  for sel in ['del','s','.old-price','.list-price','.price-old','[class*="oldPrice"]','[class*="old-price"]','[class*="listPrice"]','[class*="discountedPrice"]']:
-   for e in soup.select(sel):
-    x=money(e.get_text(' ',strip=True))
-    if x:old.append(x)
   if not current_vals:
    current_vals=prices(soup.get_text(' ',strip=True))[:50]
   if not current_vals:return None
-  # Never choose a tiny coupon/installment/shipping value as the product price.
+
+  # Arama kartındaki kupon/taksit gibi küçük rakamların ürün fiyatı olmasını engelle.
   plausible=[x for x in current_vals if x>=max(1,expected_current*0.50)]
   if not plausible: plausible=current_vals
   current=min(plausible,key=lambda x:abs(x-expected_current))
-  if abs(current-expected_current)/max(expected_current,1)>0.35:return None
-  previous=max(old or [x for x in current_vals if x>current],default=None)
-  if not previous or previous<=current:previous=expected_previous
+  if abs(current-expected_current)/max(expected_current,1)>0.35:
+   print(f'VERIFY FİYAT UYUŞMAZ | {site} | beklenen={expected_current:.2f} | sayfa={current:.2f}')
+   return None
+
+  # ÖNCEKİ FİYAT: sadece açıkça eski/liste fiyatı işaretleyen alanlardan al.
+  # Sayfadaki en büyük TL değerini artık kesinlikle "önceki fiyat" kabul etmiyoruz.
+  old=[]
+  old_selectors=[
+   'del','s','.old-price','.list-price','.price-old',
+   '[class*="oldPrice"]','[class*="old-price"]','[class*="listPrice"]',
+   '[data-a-strike="true"]','[aria-label*="eski"]','[aria-label*="liste"]'
+  ]
+  for sel in old_selectors:
+   for e in soup.select(sel):
+    txt=e.get_text(' ',strip=True)
+    x=money(txt)
+    if x and x>current: old.append(x)
+
+  # Amazon'da "liste fiyatı"/"indirim" bloklarını da yalnızca metinsel bağlamı ile kabul et.
+  page_text=soup.get_text(' ',strip=True)
+  explicit_old=[]
+  for pat in [
+   r'(?:Liste Fiyatı|Liste fiyatı|Eski fiyat|Önceki fiyat|Normal fiyat|Tavsiye edilen satış fiyatı)\s*[:]?\s*([\d.,]+)\s*(?:TL|₺)',
+   r'(?:was|list price|previous price|regular price)\s*[:]?\s*([\d.,]+)\s*(?:TL|₺)',
+  ]:
+   for m in re.finditer(pat,page_text,re.I):
+    x=money(m.group(1))
+    if x and x>current: explicit_old.append(x)
+  old.extend(explicit_old)
+
+  previous=max(old) if old else None
+  if not previous:
+   # Arama kartından gelen önceki fiyat ancak makul bir oran içindeyse kullanılabilir.
+   previous=expected_previous if expected_previous>current else None
+
   if not previous or previous<=current:return None
+
+  # Kritik güvenlik: gerçek indirimlerde eski fiyatın mevcut fiyatın onlarca katı olması
+  # çoğunlukla yanlış parse edilmiş referans/kupon fiyatıdır. Böyle bir durumda paylaşma.
+  ratio=previous/current
+  if ratio>4.0:
+   print(f'VERIFY ESKİ FİYAT ŞÜPHELİ | {site} | mevcut={current:.2f} | önceki={previous:.2f} | oran={ratio:.1f}x')
+   return None
+
   disc=(previous-current)/previous*100
   if disc<MIN_DISCOUNT:return None
-  # Sanity guard: a 99%+ drop is allowed only when the product page itself confirms it.
-  if disc>=95 and current<expected_current*0.5:return None
   return clean_title(title),current,previous,disc,image
  except Exception as e:
   print('VERIFY HATA',site,u,e); return None
