@@ -1,14 +1,15 @@
 name: Bahadir Indirim Botu
 
 on:
-  push:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
 
+# 5 dakikalık taramalar birbirini iptal etmesin.
+# Supabase dedup mekanizması aynı fırsatın tekrar paylaşılmasını engeller.
 concurrency:
   group: bahadir-indirim-scanner
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-bot:
