@@ -23,12 +23,10 @@ MARKETS={
 QUERIES=['indirim','fırsat','kampanya','çok satan','elektronik','telefon','kulaklık','televizyon','ev yaşam','mutfak','kişisel bakım','bebek','oyuncak','spor','kozmetik']
 MONEY_RE=re.compile(r'(?<![A-ZÇĞİÖŞÜ])(?:\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)(?![A-ZÇĞİÖŞÜ])',re.I)
 
-
 def sb(method,path,**kw):
  h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
  if method=='POST':h['Prefer']='return=representation'
  r=requests.request(method,f'{SB}/rest/v1/{path}',headers=h,timeout=15,**kw); r.raise_for_status(); return r.json() if r.text else []
-
 
 def money(x):
  s=re.sub(r'[^0-9,.]','',str(x))
@@ -42,15 +40,12 @@ def money(x):
   x=float(s); return x if 0<x<10000000 else None
  except:return None
 
-
 def prices(text):return [money(x.group()) for x in MONEY_RE.finditer(text or '') if money(x.group())]
-
 
 def normalize(site,u):
  p=urlparse(u); q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower() not in TRACKING]
  if site=='Amazon' and AMAZON_TAG:q.append(('tag',AMAZON_TAG))
  return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(q,doseq=True),''))
-
 
 def valid(site,u):
  try:
@@ -58,17 +53,14 @@ def valid(site,u):
   return host.endswith(MARKETS[site][1]) and bool(MARKETS[site][2].search(p.path))
  except:return False
 
-
 def clean_title(text):
  text=' '.join((text or '').split())
  text=re.sub(r'\b(?:Sepete ekle|Hızlı Teslimat|Çok Satan|Sponsorlu|Reklam)\b',' ',text,flags=re.I)
  return re.sub(r'\s{2,}',' ',text).strip()[:220]
 
-
 def extract_card_data(site,href,anchor_text,card_text):
  all_prices=prices(card_text)
  if len(all_prices)<2:return None
- # Prefer explicit old/current price selectors encoded in card text.
  current=None; previous=None
  for pat in [
   r'(?:şimdi|şuan|şu an|güncel|satış|fiyatı?)\s*[:=]?\s*([\d.,]+)\s*(?:TL|₺)',
@@ -92,14 +84,12 @@ def extract_card_data(site,href,anchor_text,card_text):
  if len(title)<10:return None
  return disc,normalize(site,href),title,current,previous
 
-
 def extract_search_candidates(page,site,query):
  base=MARKETS[site][0]
  page.goto(base+quote(query),wait_until='domcontentloaded',timeout=12000)
  page.wait_for_timeout(1000)
  raw=page.locator('a[href]').evaluate_all("""els => els.map(a => {
-  let p=a;
-  let card='';
+  let p=a; let card='';
   for(let i=0;i<7 && p;i++,p=p.parentElement){
     let t=(p.innerText||'').replace(/\\s+/g,' ').trim();
     if((t.match(/(?:TL|₺)/gi)||[]).length>=2){card=t;break;}
@@ -113,46 +103,47 @@ def extract_search_candidates(page,site,query):
   u=normalize(site,u)
   if u in seen:continue
   seen.add(u)
-  card=item.get('card') or ''
-  data=extract_card_data(site,u,item.get('text') or '',card)
+  data=extract_card_data(site,u,item.get('text') or '',item.get('card') or '')
   if data:
    out.append(data)
    if len(out)>=8:break
  print(f'BAĞIMSIZ ARAMA | {site} | "{query}" | aday={len(out)}')
  return out
 
-
-def verify(page,site,u,fallback_title,expected):
+def verify(page,site,u,fallback_title,expected_current,expected_previous):
  try:
-  page.goto(u,wait_until='domcontentloaded',timeout=12000); page.wait_for_timeout(700)
+  page.goto(u,wait_until='domcontentloaded',timeout=12000)
+  page.wait_for_timeout(700)
   html=page.content(); soup=BeautifulSoup(html,'html.parser')
   title=(soup.select_one('meta[property="og:title"]') or soup.select_one('meta[name="twitter:title"]'))
   title=title.get('content','').strip() if title else ''
   if not title:title=(soup.title.get_text(' ',strip=True) if soup.title else fallback_title)
   image=(soup.select_one('meta[property="og:image"]') or soup.select_one('meta[name="twitter:image"]'))
   image=image.get('content','').strip() if image else None
-  cur=[]; old=[]
+  current_vals=[]; old=[]
   for sel in ['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]','[data-price]']:
    for e in soup.select(sel):
     x=money(e.get('content') or e.get('value') or e.get('data-price') or e.get_text(' ',strip=True))
-    if x:cur.append(x)
+    if x:current_vals.append(x)
   for sel in ['del','s','.old-price','.list-price','.price-old','[class*="oldPrice"]','[class*="old-price"]','[class*="listPrice"]','[class*="discountedPrice"]']:
    for e in soup.select(sel):
     x=money(e.get_text(' ',strip=True))
     if x:old.append(x)
-  if not cur:
-   # Fallback to visible product page text.
-   cur=prices(soup.get_text(' ',strip=True))[:20]
-  if not cur:return None
-  current=min(cur,key=lambda x:abs(x-expected))
-  previous=max(old or [x for x in cur if x>current],default=None)
+  if not current_vals:
+   current_vals=prices(soup.get_text(' ',strip=True))[:50]
+  if not current_vals:return None
+  current=min(current_vals,key=lambda x:abs(x-expected_current))
+  if abs(current-expected_current)/max(expected_current,1)>0.35:return None
+  previous=max(old or [x for x in current_vals if x>current],default=None)
+  # If the marketplace product page does not expose the struck-through/list price,
+  # retain the old price already extracted from the marketplace search card.
+  if not previous or previous<=current:previous=expected_previous
   if not previous or previous<=current:return None
   disc=(previous-current)/previous*100
   if disc<MIN_DISCOUNT:return None
   return clean_title(title),current,previous,disc,image
  except Exception as e:
   print('VERIFY HATA',site,u,e); return None
-
 
 def send(site,u,title,current,previous,disc,image):
  rows=sb('GET','products',params={'select':'*','product_url':f'eq.{u}','limit':'1'})
@@ -167,20 +158,22 @@ def send(site,u,title,current,previous,disc,image):
  text=f'🔥 %{disc:.0f} İNDİRİM\n\n🛍️ {title}\n💰 {fmt(current)}\n🏷️ Önceki: {fmt(previous)}\n\n👇 Fırsata git'
  kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
  try:
+  sent=False
   if image:
    r=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',json={'chat_id':CHAT,'photo':image,'caption':text,'reply_markup':kb},timeout=15)
-   if r.ok:
-    sent=True
-   else:sent=False
-  else:sent=False
+   sent=r.ok
   if not sent:
-   requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':text,'disable_web_page_preview':False,'reply_markup':kb},timeout=15).raise_for_status()
+   r=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':text,'disable_web_page_preview':False,'reply_markup':kb},timeout=15)
+   r.raise_for_status()
  except Exception as e:
   print('GÖNDERME HATASI',site,u,e);return False
- if row and row.get('id'):sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat(),'current_price':current,'previous_price':previous,'updated_at':datetime.now(timezone.utc).isoformat()})
- else:save_row=sb('POST','products',json={'product_name':title,'current_price':current,'previous_price':previous,'product_url':u,'site':site,'updated_at':datetime.now(timezone.utc).isoformat(),'last_posted_at':datetime.now(timezone.utc).isoformat()})
- print(f'BAĞIMSIZ FIRSAT | {site} | %{disc:.1f} | {current:.2f} TL | {title[:90]}');return True
-
+ now=datetime.now(timezone.utc).isoformat()
+ if row and row.get('id'):
+  sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':now,'current_price':current,'previous_price':previous,'updated_at':now})
+ else:
+  sb('POST','products',json={'product_name':title,'current_price':current,'previous_price':previous,'product_url':u,'site':site,'updated_at':now,'last_posted_at':now})
+ print(f'BAĞIMSIZ FIRSAT | {site} | %{disc:.1f} | {current:.2f} TL | {title[:90]}')
+ return True
 
 def main():
  total=0; candidates_total=0; verified_total=0
@@ -192,12 +185,12 @@ def main():
    for query in QUERIES:
     try:
      candidates=extract_search_candidates(page,site,query); candidates_total+=len(candidates)
-     for disc,site2,u,title,current,old in candidates:
-      v=verify(detail,site2,u,title,current)
+     for disc,u,title,current,old in candidates:
+      v=verify(detail,site,u,title,current,old)
       if v:
        verified_total+=1
        t,c,p,d,img=v
-       if send(site2,u,t,c,p,d,img):total+=1
+       if send(site,u,t,c,p,d,img):total+=1
     except Exception as e:print('ARAMA HATA',site,query,e)
   browser.close()
  print(f'Bağımsız tarama tamamlandı | aday={candidates_total} doğrulanan={verified_total} gönderilen={total}')
