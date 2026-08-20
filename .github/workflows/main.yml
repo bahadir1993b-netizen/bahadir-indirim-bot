@@ -2,22 +2,20 @@ name: Bahadir Indirim Botu
 
 on:
   workflow_dispatch:
-  repository_dispatch:
-    types: [next_scan]
   schedule:
     - cron: "17,47 * * * *"
 
-# Schedule yedek başlatıcıdır. Ana tarama ise her tamamlandığında
-# repository_dispatch ile bir sonraki taramayı kendisi başlatır.
-# Böylece 5 dakikalık GitHub scheduler gecikmesine bağlı kalmayız.
+# GitHub Actions'ın başka bir workflow'u GITHUB_TOKEN ile tetiklemesi bazı
+# repo ayarlarında 403 verebildiği için self-dispatch kullanılmıyor.
+# Bunun yerine tek runner birkaç taramayı art arda yapıyor.
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
-      contents: write
-      actions: write
+      contents: read
+      actions: read
     steps:
       - name: Otomatik çalışma kontrolü
         run: |
@@ -63,50 +61,50 @@ jobs:
           r.raise_for_status()
           PY
 
-      - name: Telegram reklam kaynaklarını önceliklendir
-        run: python apply_priority_runtime_patch.py
-
-      - name: Telegram kaynak taraması
-        timeout-minutes: 3
-        continue-on-error: true
+      - name: İlk tarama
+        timeout-minutes: 15
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
+          python apply_priority_runtime_patch.py
           python apply_telegram_runtime_patch.py
           sed -i 's/^MAX_AGE=.*/MAX_AGE=15/' telegram_sources.py
-          python telegram_sources.py
+          python telegram_sources.py || true
+          python apply_marketplace_runtime_patch.py
+          python apply_scanner_runtime_patch.py
+          python apply_speed_runtime_patch.py
+          python marketplace_scanner.py
 
-      - name: Marketplace fiyat doğrulama düzeltmesi
-        run: python apply_marketplace_runtime_patch.py
-
-      - name: Scanner çıktı düzeltmeleri
-        run: python apply_scanner_runtime_patch.py
-
-      - name: Scanner hız ve süre düzeltmesi
-        run: python apply_speed_runtime_patch.py
-
-      - name: Bağımsız internet fiyat taraması
-        timeout-minutes: 8
+      - name: Aynı runner üzerinde sonraki taramalar
+        timeout-minutes: 43
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
-        run: python marketplace_scanner.py
-
-      # Her çalışma bitince yeni taramayı başlat.
-      - name: Sonraki taramayı başlat
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
-          echo "Yeni tarama tetikleniyor..."
-          gh api --method POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/repos/$REPO/dispatches" \
-            -f event_type=next_scan
+          set +e
+          for i in 1 2 3; do
+            echo "========================================"
+            echo "OTOMATİK TARAMA #$i"
+            echo "Zaman: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "========================================"
+            echo "5 dakika bekleniyor..."
+            sleep 300
+
+            python apply_priority_runtime_patch.py
+            python apply_telegram_runtime_patch.py
+            sed -i 's/^MAX_AGE=.*/MAX_AGE=15/' telegram_sources.py
+            python telegram_sources.py
+
+            python apply_marketplace_runtime_patch.py
+            python apply_scanner_runtime_patch.py
+            python apply_speed_runtime_patch.py
+            python marketplace_scanner.py
+
+            echo "Tarama #$i tamamlandı: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          done
+          echo "Bu workflow içindeki otomatik tarama döngüsü tamamlandı."
