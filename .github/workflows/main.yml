@@ -55,6 +55,8 @@ jobs:
           PY
       - name: Telegram çıktı düzeltmeleri
         run: python apply_telegram_runtime_patch.py
+      - name: Marketplace fiyat doğrulama düzeltmesi
+        run: python apply_marketplace_runtime_patch.py
       - name: Telegram fırsat keşfi (Amazon + Hepsiburada + Trendyol)
         timeout-minutes: 8
         env:
