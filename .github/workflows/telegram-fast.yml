@@ -1,13 +1,13 @@
 name: Bahadir Telegram Kaynak Tarama
 
-# Telegram katmanı tek seferlik cron işine bağlı kalmaz; runner açıkken
-# kendi içinde 5 dakikalık döngüyle taramayı sürdürür.
+# Telegram kaynakları GitHub Actions tarafından otomatik olarak her 5 dakikada taranır.
+# GitHub Actions için desteklenen en kısa schedule aralığı 5 dakikadır.
 on:
   workflow_dispatch:
   push:
     branches: [main]
   schedule:
-    - cron: "0 */5 * * *"
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: bahadir-telegram-scanner
@@ -16,37 +16,23 @@ concurrency:
 jobs:
   telegram:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 15
     steps:
       - name: Kodu indir
         uses: actions/checkout@v5
+
       - name: Python kur
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
+
+      # HER TURDA İLK İŞ: Telegram kanallarını hızlıca kontrol et.
+      # Tarayıcı/OCR kurulumu fırsatların önüne geçmez.
       - name: ⚡ Önce Telegram kanallarını tara
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          set -u
-          echo "=== ÖNCELİK: Telegram kaynakları, tarayıcı/OCR kurulumundan ÖNCE ==="
-          timeout 120s python telegram_fast_sources.py || echo "Hızlı Telegram taraması bu turda hata verdi; tam tarama devam edecek."
-      - name: Chromium kur
-        run: python -m playwright install --with-deps chromium
-      - name: OCR motoru kur
-        run: sudo apt-get install -y tesseract-ocr tesseract-ocr-tur
-      - name: Telegram kaynak önceliklerini uygula
-        run: python apply_priority_runtime_patch.py
-      - name: Telegram kaynak ve görsel düzeltmeleri
-        run: python apply_telegram_runtime_patch.py
-      - name: Telegram canlı fiyat fallback düzeltmesi
-        run: python apply_telegram_safety_patch.py
-      - name: Telegram 5 dakikalık sürekli tarama
-        timeout-minutes: 330
+        timeout-minutes: 3
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -54,22 +40,42 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
           set -u
-          # GitHub-hosted runner üst sınırının içinde kal.
-          end=$((SECONDS + 19800))
-          cycle=0
-          while [ "$SECONDS" -lt "$end" ]; do
-            cycle=$((cycle + 1))
-            cycle_start=$SECONDS
-            echo "=== Telegram tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
-            sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
-            timeout 240s python telegram_sources.py || echo "Telegram kaynak taraması bu turda hata verdi; sonraki tur devam edecek."
-            timeout 90s python telegram_image_ocr_v2.py || echo "OCR bu turda hata verdi; sonraki tur devam edecek."
-            remaining=$((end - SECONDS))
-            if [ "$remaining" -le 0 ]; then break; fi
-            elapsed=$((SECONDS - cycle_start))
-            sleep_for=$((300 - elapsed))
-            if [ "$sleep_for" -lt 0 ]; then sleep_for=0; fi
-            if [ "$sleep_for" -gt "$remaining" ]; then sleep_for="$remaining"; fi
-            echo "Sonraki Telegram turu ${sleep_for} saniye sonra."
-            sleep "$sleep_for"
-          done
+          echo "=== ÖNCELİK: Telegram kaynakları ==="
+          timeout 120s python telegram_fast_sources.py || echo "Hızlı Telegram taraması bu turda hata verdi."
+
+      # Hızlı taramadan sonra ağır kontroller.
+      - name: Chromium kur
+        run: python -m playwright install --with-deps chromium
+
+      - name: OCR motoru kur
+        run: sudo apt-get install -y tesseract-ocr tesseract-ocr-tur
+
+      - name: Telegram kaynak önceliklerini uygula
+        run: python apply_priority_runtime_patch.py
+
+      - name: Telegram kaynak ve görsel düzeltmeleri
+        run: python apply_telegram_runtime_patch.py
+
+      - name: Telegram canlı fiyat fallback düzeltmesi
+        run: python apply_telegram_safety_patch.py
+
+      - name: Telegram detaylı tarama
+        timeout-minutes: 6
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
+        run: |
+          set -u
+          sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
+          timeout 240s python telegram_sources.py || echo "Detaylı Telegram taraması bu turda hata verdi."
+
+      - name: Telegram görsel/OCR taraması
+        timeout-minutes: 3
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
+        run: timeout 120s python telegram_image_ocr_v2.py || echo "OCR bu turda hata verdi."
