@@ -7,12 +7,11 @@ TOKEN=os.environ['TELEGRAM_BOT_TOKEN']
 SUPABASE_URL=os.environ['SUPABASE_URL'].rstrip('/')
 SUPABASE_KEY=os.environ['SUPABASE_SERVICE_KEY']
 CHANNEL_ID='-1004424116637'
-MAX_AGE_MINUTES=15
+MAX_AGE_MINUTES=180
 SOURCES={'OnuAl':'onual_firsat','Enes ÖZEN':'enesozen','İndirim Bakanlığı':'indirimbakanligi','Cihaz.TV':'cihaztv'}
 SITES=('Amazon','Hepsiburada','Trendyol')
 COMMON={'INDIRIM','KAMPANYA','FIRSAT','KODU','KOD','KUPON','PROMOSYON','AMAZON','HEPSIBURADA','TRENDYOL','TL','TRY','MOBIL','UYGULAMADA','SEPETTE'}
 HEADERS={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
-
 SHORT_SITES={'app.hb.biz':'Hepsiburada','hps.im':'Hepsiburada','ty.gl':'Trendyol','tyml.gl':'Trendyol','amzn.to':'Amazon','amzn.eu':'Amazon','link.amazon':'Amazon'}
 
 def sb(method,path,**kwargs):
@@ -106,14 +105,13 @@ def fetch(source,channel):
         raw=text.get_text('\n',strip=True)
         code=extract_code(raw)
         if not code:continue
-        site=site_of_text(raw) or site_of_link(text)
+        site=site_of_text(raw) or site_of_link(block)
         if site not in SITES:continue
         post_id=block.get('data-post','').split('/')[-1] or hashlib.sha1(raw.encode()).hexdigest()[:16]; key=f'{channel}:{post_id}:{code}'
         if seen(key):continue
-        link=product_link(text,site); source_link=f'https://t.me/{channel}/{post_id}' if post_id.isdigit() else url
+        link=product_link(block,site); source_link=f'https://t.me/{channel}/{post_id}' if post_id.isdigit() else url
         prices=money_values(raw); disc=discount_amount(raw); minimum=min_spend(raw); cond=conditions(raw,code)
-        active_hint=bool(re.search(r'aktif|mevcut|geçerli|gecerli|sepette|uygulamada|mobil|kullanabilirsiniz|kullanılır|kullanilir',raw,re.I))
-        # Kaynak kodu açıkça kampanya olarak vermiyorsa ve aktiflik işareti yoksa paylaşma.
+        active_hint=bool(re.search(r'aktif|mevcut|geçerli|gecerli|sepette|uygulamada|mobil|kullanabilirsiniz|kullanılır|kullanilir|başladı|basladi',raw,re.I))
         if not active_hint and not re.search(r'\b(?:KOD|KODU|KUPON)\b',raw,re.I):continue
         lines=[f'🎟️ {site.upper()} İNDİRİM KODU','',f'🏷️ Kod: {code}']
         if disc: lines.append(f'💸 İndirim: {disc}')
