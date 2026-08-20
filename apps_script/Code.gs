@@ -22,8 +22,6 @@ function doGet(e) {
       return json({ok:true,site:site,q:term,source:'marketplace',http_status:direct.status,products:direct.products.slice(0,20)});
     }
 
-    // Marketplace GitHub/Apps Script IP'sini engelliyorsa arama motorlarından
-    // yalnızca ürün URL'si keşfedilir. Fiyat kesinlikle arama motorundan alınmaz.
     let products = bingHtmlSearch(site, term);
     let source = 'bing-html';
     if (!products.length) {
@@ -70,8 +68,8 @@ function bingHtmlSearch(site, term) {
   const out = [];
   const seen = {};
   try {
-    const res = request('https://www.bing.com/search?q=' + encodeURIComponent(query) + '&count=30');
-    const html = decodeEntities(res.getContentText());
+    const res = request('https://www.bing.com/search?q=' + encodeURIComponent(query) + '&count=30&setlang=tr');
+    const html = normalizeSearchText(res.getContentText());
     extractSearchLinks(site, html, out, seen);
   } catch (_) {}
   return out;
@@ -83,12 +81,12 @@ function bingRssSearch(site, term) {
   const seen = {};
   try {
     const res = request('https://www.bing.com/search?format=rss&count=50&q=' + encodeURIComponent('site:' + cfg.host + ' ' + term));
-    const xml = decodeXml(res.getContentText());
+    const xml = normalizeSearchText(res.getContentText());
     const links = xml.match(/<link>[\s\S]*?<\/link>/gi) || [];
     for (const tag of links) {
       let raw = tag.replace(/^<link>/i,'').replace(/<\/link>$/i,'').trim();
-      raw = decodeXml(raw);
       addSearchUrl(site, raw, out, seen);
+      if (out.length >= 20) break;
     }
     if (out.length < 20) extractSearchLinks(site, xml, out, seen);
   } catch (_) {}
@@ -101,8 +99,8 @@ function googleSearch(site, term) {
   const seen = {};
   try {
     const q = 'site:' + cfg.host + ' ' + term;
-    const res = request('https://www.google.com/search?q=' + encodeURIComponent(q) + '&num=30&hl=tr');
-    const html = decodeEntities(res.getContentText());
+    const res = request('https://www.google.com/search?q=' + encodeURIComponent(q) + '&num=30&hl=tr&gl=tr');
+    const html = normalizeSearchText(res.getContentText());
     extractSearchLinks(site, html, out, seen);
   } catch (_) {}
   return out;
@@ -110,41 +108,84 @@ function googleSearch(site, term) {
 
 function extractSearchLinks(site, html, out, seen) {
   const cfg = SITES[site];
-  const hrefs = html.match(/href\s*=\s*["'][^"']+["']/gi) || [];
+  const text = normalizeSearchText(html);
+
+  // 1) href içindeki her adayı çöz; Google sonuçları çoğunlukla
+  // /url?q=..., /url?url=... veya benzeri yönlendirme kullanır.
+  const hrefs = text.match(/href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi) || [];
   for (const h of hrefs) {
-    const raw = h.replace(/^href\s*=\s*["']/i,'').replace(/["']$/,'');
+    let raw = h.replace(/^href\s*=\s*/i,'').replace(/^['"]|['"]$/g,'');
     collectUrlCandidates(site, raw, out, seen);
     if (out.length >= 20) return;
   }
 
-  // Arama motoru HTML'sinde doğrudan marketplace URL'si gömülü ise onu da yakala.
-  const direct = html.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"\\\\]+', 'ig')) || [];
+  // 2) HTML içinde çıplak/escape edilmiş marketplace URL'lerini tara.
+  const directRe = new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"\\\\]+', 'ig');
+  const direct = text.match(directRe) || [];
   for (const raw of direct) {
     addSearchUrl(site, raw, out, seen);
+    if (out.length >= 20) return;
+  }
+
+  // 3) Google/Bing'in encode ettiği URL'ler HTML'de href dışında da bulunabilir.
+  const encoded = text.match(/(?:https?%3A%2F%2F|https?\\u003A\\u002F\\u002F)[^\s"'<>]+/ig) || [];
+  for (const raw of encoded) {
+    collectUrlCandidates(site, raw, out, seen);
     if (out.length >= 20) return;
   }
 }
 
 function collectUrlCandidates(site, raw, out, seen) {
-  let u = decodeEntities(raw).replace(/\\\//g,'/');
-  addSearchUrl(site,u,out,seen);
+  let u = normalizeCandidate(raw);
+  if (!u) return;
 
-  // Bing/Google sonucu yönlendirme URL'sinin içindeki gerçek URL'yi çıkar.
+  // Önce doğrudan URL ise kabul et.
+  addSearchUrl(site, u, out, seen);
+  if (out.length >= 20) return;
+
+  // Arama motoru yönlendirmelerinde gerçek URL; q/url/u/uddg/target
+  // parametrelerinden birinin içinde olabilir. Birkaç kat decode ederek çöz.
+  for (let depth = 0; depth < 4; depth++) {
+    const next = unwrapOne(u);
+    if (!next || next === u) break;
+    u = next;
+    addSearchUrl(site, u, out, seen);
+    if (out.length >= 20) return;
+  }
+
+  // Ham metnin içinde gömülü doğrudan marketplace URL'si varsa onu çıkar.
+  const cfg = SITES[site];
+  const m = u.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"\\\\]+', 'i'));
+  if (m) addSearchUrl(site, m[0], out, seen);
+}
+
+function unwrapOne(raw) {
+  let u = normalizeCandidate(raw);
+  if (!u) return '';
+
   try {
-    const q = u.match(/[?&](?:u|url|q)=([^&]+)/i);
-    if (q) addSearchUrl(site,decodeURIComponent(q[1]),out,seen);
+    // Tam URL'nin query parametrelerini oku.
+    if (/^https?:\/\//i.test(u)) {
+      const m = u.match(/[?&](?:q|url|u|uddg|target|dest|destination)=([^&#]+)/i);
+      if (m) {
+        const decoded = safeDecode(m[1]);
+        if (decoded && decoded !== u) return decoded;
+      }
+    }
+
+    // Bazı sonuçlarda parametre adı görünmeden encode edilmiş gerçek URL bulunur.
+    const enc = u.match(/https?%3A%2F%2F[^\s"'<>]+/i);
+    if (enc) return safeDecode(enc[0]);
   } catch (_) {}
+  return '';
 }
 
 function addSearchUrl(site, raw, out, seen) {
   const cfg = SITES[site];
-  let u = decodeEntities(String(raw || ''))
-    .replace(/\\\//g,'/')
-    .replace(/["'<>]+$/g,'')
-    .trim();
+  let u = normalizeCandidate(raw);
   if (!/^https?:\/\//i.test(u)) return;
 
-  // URL'nin içinde marketplace alan adı geçiyorsa doğrudan olan kısmı ayıkla.
+  // İç içe URL varsa doğrudan marketplace kısmını ayıkla.
   const m = u.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"\\\\]+', 'i'));
   if (m) u = m[0];
 
@@ -162,30 +203,43 @@ function addSearchUrl(site, raw, out, seen) {
 function extractProducts(site, html) {
   const out = [];
   const seen = {};
+  const normalized = normalizeSearchText(html);
   const re = /href\s*=\s*["']([^"']+)["']/gi;
   let m;
-  while ((m = re.exec(html)) !== null) {
-    const raw = decodeEntities(m[1]).replace(/\\\//g,'/');
-    const urls = raw.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(SITES[site].host) + '\\/[^\\s"<>]+', 'ig')) || [];
-    for (const u0 of urls) addSearchUrl(site,u0,out,seen);
+  while ((m = re.exec(normalized)) !== null) {
+    collectUrlCandidates(site,m[1],out,seen);
     if (out.length >= 20) break;
   }
-  if (out.length < 20) {
-    const re2 = new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(SITES[site].host) + '\\/[^\\s"<>\\\\]+', 'ig');
-    const matches = html.match(re2) || [];
-    for (const u0 of matches) addSearchUrl(site,u0,out,seen);
-  }
+  if (out.length < 20) extractSearchLinks(site,normalized,out,seen);
   return out;
+}
+
+function normalizeSearchText(s) {
+  return decodeEntities(String(s || ''))
+    .replace(/\\u002F/gi,'/')
+    .replace(/\\u003A/gi,':')
+    .replace(/\\\//g,'/');
+}
+
+function normalizeCandidate(s) {
+  let u = decodeEntities(String(s || '')).trim();
+  u = u.replace(/^['"]|['"]$/g,'').replace(/\\u002F/gi,'/').replace(/\\u003A/gi,':').replace(/\\\//g,'/');
+  for (let i = 0; i < 3; i++) {
+    const d = safeDecode(u);
+    if (!d || d === u) break;
+    u = d;
+  }
+  return u.replace(/[<>]+$/g,'').trim();
+}
+
+function safeDecode(s) {
+  try { return decodeURIComponent(String(s)); } catch (_) { return String(s); }
 }
 
 function decodeEntities(s) {
   return String(s || '')
-    .replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'")
-    .replace(/&lt;/g,'<').replace(/&gt;/g,'>');
-}
-
-function decodeXml(s) {
-  return decodeEntities(String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1'));
+    .replace(/&amp;/gi,'&').replace(/&quot;/gi,'"').replace(/&#39;/g,"'")
+    .replace(/&#x27;/gi,"'").replace(/&lt;/gi,'<').replace(/&gt;/gi,'>');
 }
 
 function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
