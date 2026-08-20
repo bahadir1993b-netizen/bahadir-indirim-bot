@@ -3,31 +3,36 @@ name: Bahadir Indirim Botu
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "17,47 * * * *"
 
-# DİKKAT: concurrency bilinçli olarak kullanılmıyor.
-# GitHub Actions concurrency grubunda aynı anda 1 çalışan + 1 bekleyen run tutulur;
-# 5 dakikalık scheduler'da uzun süren taramalar yüzünden ara schedule run'ları kaybolabilir.
-# Supabase dedup aynı fırsatın tekrar paylaşılmasını zaten engelliyor.
+# Schedule yalnızca yedek başlatıcıdır. Ana döngü kendi kendini yeniden tetikler.
+# Böylece GitHub scheduler gecikse/kaçırsa bile bot tekrar çalıştırılır.
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Otomatik çalışma kontrolü
         run: |
           echo "Bot çalışma zamanı: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "Tetikleyici: ${{ github.event_name }}"
           echo "Ref: ${{ github.ref }}"
+
       - name: Kodu indir
         uses: actions/checkout@v5
+
       - name: Python kur
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
+
       - name: Playwright cache
         uses: actions/cache@v5
         with:
@@ -35,9 +40,11 @@ jobs:
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             playwright-chromium-${{ runner.os }}-
+
       - name: Chromium kur
         timeout-minutes: 4
         run: python -m playwright install chromium
+
       - name: Supabase bağlantı testi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -52,8 +59,10 @@ jobs:
           print(f"Supabase cevap: {r.text[:500]}")
           r.raise_for_status()
           PY
+
       - name: Telegram reklam kaynaklarını önceliklendir
         run: python apply_priority_runtime_patch.py
+
       - name: Telegram kaynak taraması
         timeout-minutes: 3
         continue-on-error: true
@@ -66,12 +75,16 @@ jobs:
           python apply_telegram_runtime_patch.py
           sed -i 's/^MAX_AGE=.*/MAX_AGE=15/' telegram_sources.py
           python telegram_sources.py
+
       - name: Marketplace fiyat doğrulama düzeltmesi
         run: python apply_marketplace_runtime_patch.py
+
       - name: Scanner çıktı düzeltmeleri
         run: python apply_scanner_runtime_patch.py
+
       - name: Scanner hız ve süre düzeltmesi
         run: python apply_speed_runtime_patch.py
+
       - name: Bağımsız internet fiyat taraması
         timeout-minutes: 8
         env:
@@ -80,3 +93,14 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: python marketplace_scanner.py
+
+      # Her başarılı/başarısız taramadan sonra yeni bir run kuyruğa alınır.
+      # Aynı workflow'un birbirini kilitlememesi için concurrency kullanılmıyor.
+      - name: Sonraki taramayı kuyruğa al
+        if: always() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Yeni tarama tetikleniyor..."
+          gh workflow run "Bahadir Indirim Botu" --repo "$REPO" --ref main
