@@ -2,6 +2,7 @@ import os
 import re
 import html as htmlmod
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from bs4 import BeautifulSoup
@@ -11,7 +12,8 @@ TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 SB = os.environ['SUPABASE_URL'].rstrip('/')
 KEY = os.environ['SUPABASE_SERVICE_KEY']
 CHAT = '-1004424116637'
-MAX_AGE = 90
+# GitHub Actions 5 dakikalik schedule gecikebildigi icin kucuk bir pencere birakiyoruz.
+MAX_AGE = 20
 MIN_DISCOUNT = 10.0
 COOLDOWN = 12
 AMAZON_TAG = os.getenv('AMAZON_ASSOCIATE_TAG', '').strip()
@@ -23,17 +25,24 @@ TRACKING = {'utm_source','utm_medium','utm_campaign','utm_content','utm_term','f
 DEAL_WORDS = re.compile(r'kupon|kod(?:u)?|sepette|kampanya|indirim|promosyon|aktif|geçerli|gecerli|2 al 1|3 al 2|4 al 3', re.I)
 MONEY_RE = re.compile(r'(?<![A-ZÇĞİÖŞÜ])(?:\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)(?![A-ZÇĞİÖŞÜ])', re.I)
 
+
 def sb(method, path, **kw):
     h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
     if method=='POST': h['Prefer']='return=representation'
-    r=requests.request(method,f'{SB}/rest/v1/{path}',headers=h,timeout=15,**kw); r.raise_for_status(); return r.json() if r.text else []
+    r=requests.request(method,f'{SB}/rest/v1/{path}',headers=h,timeout=15,**kw)
+    r.raise_for_status()
+    return r.json() if r.text else []
 
-def clean(u): return htmlmod.unescape(u or '').replace('\\/','/').split('#',1)[0].rstrip('/')
+
+def clean(u):
+    return htmlmod.unescape(u or '').replace('\\/','/').split('#',1)[0].rstrip('/')
+
 
 def money(s):
     s=re.sub(r'[^0-9,.]','',str(s).replace('TL','').replace('₺','').replace(' ',''))
     if not s:return None
-    if ',' in s and '.' in s: s=s.replace('.','').replace(',','.') if s.rfind(',')>s.rfind('.') else s.replace(',','')
+    if ',' in s and '.' in s:
+        s=s.replace('.','').replace(',','.') if s.rfind(',')>s.rfind('.') else s.replace(',','')
     elif ',' in s:
         a,b=s.rsplit(',',1); s=a.replace('.','')+'.'+b if len(b)<=2 else s.replace(',','')
     elif '.' in s:
@@ -42,7 +51,10 @@ def money(s):
         x=float(s); return x if 0<x<10000000 else None
     except: return None
 
-def prices(t): return [money(m.group()) for m in MONEY_RE.finditer(t or '') if money(m.group()) is not None]
+
+def prices(t):
+    return [money(m.group()) for m in MONEY_RE.finditer(t or '') if money(m.group()) is not None]
+
 
 def source_pair(t):
     m=re.search(r'(\d[\d.,]*)\s*(?:TL|₺)\s+yerine\s+(\d[\d.,]*)\s*(?:TL|₺)',t,re.I)
@@ -51,12 +63,14 @@ def source_pair(t):
     if m:return money(m.group(2)),money(m.group(1))
     p=prices(t); return (p[0],None) if p else (None,None)
 
+
 def site(u):
     h=urlparse(u).netloc.lower().replace('www.','')
     if h in MARKET:return MARKET[h]
     for k,v in SHORT.items():
         if h==k or h.endswith('.'+k):return v
     return None
+
 
 def valid(s,u):
     p=urlparse(u); h=p.netloc.lower().replace('www.',''); path=p.path
@@ -65,72 +79,115 @@ def valid(s,u):
     if s=='Trendyol':return h.endswith('trendyol.com') and bool(re.search(r'-p-\d+(?:[/?#&]|$)',path,re.I))
     return False
 
+
 def normalize(s,u):
     if not u or s not in MARKET.values():return None
     p=urlparse(clean(u)); q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower() not in TRACKING]
     if s=='Amazon' and AMAZON_TAG:q.append(('tag',AMAZON_TAG))
     return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(q,doseq=True),''))
 
+
 def tokens(text):
-    stop={'ürün','ürünü','hızlı','fırsat','indirim','adet','parça','set','marka','model','yeni','şimdi','tl'}
+    stop={'ürün','ürünü','hızlı','fırsat','indirim','adet','parça','set','marka','model','yeni','şimdi','tl','sadece','stok'}
     return {x for x in re.findall(r'[a-zçğıöşü0-9]{3,}',(text or '').lower()) if x not in stop}
+
 
 def title_score(title,candidate_text):
     a,b=tokens(title),tokens(candidate_text)
     return len(a&b)/max(1,len(a)) if a and b else 0
 
+
+def http_resolve(u,s):
+    try:
+        r=requests.get(clean(u),headers=HEAD,timeout=5,allow_redirects=True)
+        f=clean(r.url); ss=site(f)
+        if ss and valid(ss,f):return normalize(ss,f)
+        soup=BeautifulSoup(r.text,'html.parser')
+        for a in soup.select('a[href]'):
+            h=clean(a.get('href') or '')
+            if site(h)==s and valid(s,h):return normalize(s,h)
+    except: pass
+    return None
+
+
+def search_marketplace_http(s,title):
+    base={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q='}.get(s)
+    if not base or not title:return None
+    try:
+        r=requests.get(base+requests.utils.quote(' '.join(title.split())[:140]),headers=HEAD,timeout=6)
+        if r.status_code>=400:return None
+        soup=BeautifulSoup(r.text,'html.parser'); candidates=[]
+        for a in soup.select('a[href]'):
+            u=clean(a.get('href') or '')
+            if valid(s,u):candidates.append((title_score(title,(a.get_text(' ',strip=True) or '')[:500]+' '+u),u))
+        if candidates:
+            score,u=max(candidates,key=lambda x:x[0])
+            if score>=0.28:return normalize(s,u)
+    except: pass
+    return None
+
+
 def direct_from_page(page,u,s):
     try:
-        page.goto(u,wait_until='domcontentloaded',timeout=12000); page.wait_for_timeout(900)
+        page.goto(u,wait_until='domcontentloaded',timeout=8000)
         f=clean(page.url); ss=site(f)
         if ss and valid(ss,f):return normalize(ss,f)
         for a in page.locator('a[href]').all():
-            h=clean(a.get_attribute('href') or ''); ss=site(h)
-            if ss and valid(ss,h):return normalize(ss,h)
+            h=clean(a.get_attribute('href') or '')
+            if site(h)==s and valid(s,h):return normalize(s,h)
     except: pass
     return None
 
-def search_marketplace(page,s,title):
+
+def resolve(page,u,s,title,allow_browser=False):
+    fast=http_resolve(u,s)
+    if fast:return fast
+    fast=search_marketplace_http(s,title)
+    if fast:return fast
+    if allow_browser:
+        return direct_from_page(page,u,s) or search_marketplace_browser(page,s,title)
+    return None
+
+
+def search_marketplace_browser(page,s,title):
     base={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q='}.get(s)
-    if not base or not title or len(title)<6:return None
+    if not base:return None
     try:
-        page.goto(base+requests.utils.quote(' '.join(title.split())[:160]),wait_until='domcontentloaded',timeout=15000); page.wait_for_timeout(900)
+        page.goto(base+requests.utils.quote(' '.join(title.split())[:140]),wait_until='domcontentloaded',timeout=9000)
         candidates=[]
         for a in page.locator('a[href]').all():
             u=clean(a.get_attribute('href') or '')
-            if not valid(s,u):continue
-            candidates.append((title_score(title,(a.inner_text() or '')[:500]+' '+u),u))
+            if valid(s,u):candidates.append((title_score(title,(a.inner_text() or '')[:500]+' '+u),u))
         if candidates:
-            candidates.sort(reverse=True,key=lambda x:x[0]); score,u=candidates[0]
-            if score>=0.18:return normalize(s,u)
+            score,u=max(candidates,key=lambda x:x[0])
+            if score>=0.28:return normalize(s,u)
     except: pass
     return None
 
-def resolve(page,u,s,title):
-    try:
-        r=requests.get(clean(u),headers=HEAD,timeout=8,allow_redirects=True); f=clean(r.url); ss=site(f)
-        if ss and valid(ss,f):return normalize(ss,f)
-    except: pass
-    return direct_from_page(page,u,s) or search_marketplace(page,s,title)
 
-def marketplace_price_check(page,s,u,expected):
+def marketplace_price_check(s,u,expected):
+    # Agir Playwright yerine once normal HTTP + meta/DOM verisini deniyoruz.
     try:
-        page.goto(u,wait_until='domcontentloaded',timeout=15000); page.wait_for_timeout(1000)
-        text=page.locator('body').inner_text(timeout=8000); ps=prices(text)
-        if not ps or not expected:return None,None
-        current=min(ps,key=lambda x:abs(x-expected))
+        r=requests.get(u,headers=HEAD,timeout=7)
+        if r.status_code>=400:return None,None
+        soup=BeautifulSoup(r.text,'html.parser')
+        vals=[]
+        for sel in ['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]','[data-price]']:
+            for el in soup.select(sel):
+                v=el.get('content') or el.get('value') or el.get_text(' ',strip=True) or el.get('data-price')
+                x=money(v)
+                if x:vals.append(x)
+        for el in soup.select('del,s, .old-price, .list-price, .price-old, [class*="oldPrice"], [class*="old-price"], [class*="listPrice"]'):
+            x=money(el.get_text(' ',strip=True))
+            if x:vals.append(x)
+        if not vals or not expected:return None,None
+        current=min(vals,key=lambda x:abs(x-expected))
         if abs(current-expected)/max(expected,1)>0.35:return None,None
-        old=None
-        patterns=[r'(?:önce|önceki fiyat|eski fiyat|liste fiyatı|liste fiyat|üstü çizili|indirim öncesi)\D{0,80}(\d[\d.,]*)\s*(?:TL|₺)',r'(\d[\d.,]*)\s*(?:TL|₺)\D{0,80}(?:indirim|tasarruf|kazanç)']
-        for pat in patterns:
-            m=re.search(pat,text,re.I|re.S)
-            if m:
-                old=money(m.group(1))
-                if old and old>current:break
-                old=None
+        old=max((x for x in vals if x>current),default=None)
         if old and (old-current)/old*100>=MIN_DISCOUNT:return current,old
         return current,None
     except: return None,None
+
 
 def coupon_code(text):
     pats=[r'\b(?:KOD|KODU|KUPON|KUPON KODU|PROMOSYON(?: KODU)?)\s*[:=\-]?\s*([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{3,23})\b',r'\b([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\s+(?:KOD(?:U)?|KUPON(?:U)?)\b']
@@ -141,22 +198,32 @@ def coupon_code(text):
             return code
     return None
 
-def collect_coupons():
-    out=[]; now=datetime.now(timezone.utc)
-    for source,channel in SOURCES.items():
-        try:r=requests.get(f'https://t.me/s/{channel}',headers=HEAD,timeout=15)
+
+def fetch_source(item):
+    source,channel=item
+    try:
+        r=requests.get(f'https://t.me/s/{channel}',headers=HEAD,timeout=8)
+        return source,r
+    except Exception as e:
+        print(f'Telegram kaynak hata {source}: {type(e).__name__}: {e}'); return source,None
+
+
+def extract_blocks(source,r):
+    if not r or r.status_code>=400:return [],[]
+    now=datetime.now(timezone.utc); blocks=[]; coupons=[]
+    for b in BeautifulSoup(r.text,'html.parser').select('.tgme_widget_message'):
+        tm=b.select_one('time[datetime]'); tx=b.select_one('.tgme_widget_message_text')
+        if not tm or not tx:continue
+        try:dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
         except:continue
-        if r.status_code>=400:continue
-        for b in BeautifulSoup(r.text,'html.parser').select('.tgme_widget_message'):
-            tm=b.select_one('time[datetime]'); tx=b.select_one('.tgme_widget_message_text')
-            if not tm or not tx:continue
-            try:dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
-            except:continue
-            if now-dt>timedelta(minutes=MAX_AGE):continue
-            raw=tx.get_text(' ',strip=True); code=coupon_code(raw)
-            st=next((x for x in MARKET.values() if re.search(r'\b'+re.escape(x)+r'\b',raw,re.I)),None)
-            if code and st:out.append((st,code,raw,dt,source))
-    return out
+        age=(now-dt).total_seconds()/60
+        if age<0 or age>MAX_AGE:continue
+        blocks.append(b)
+        raw=tx.get_text(' ',strip=True); code=coupon_code(raw)
+        st=next((x for x in MARKET.values() if re.search(r'\b'+re.escape(x)+r'\b',raw,re.I)),None)
+        if code and st:coupons.append((st,code,raw,dt,source))
+    return blocks,coupons
+
 
 def match_coupon(s,title,raw,coupons):
     best=None; score=0; tt=tokens(title)
@@ -166,13 +233,21 @@ def match_coupon(s,title,raw,coupons):
         if overlap>score:score=overlap;best=(code,source)
     return best if score>=1 else None
 
-def seen(k):return bool(sb('GET','price_history',params={'select':'recorded_at','product_url':f'eq.telegram://{k}','limit':'1'}))
-def remember(k):sb('POST','price_history',json={'price':0,'product_url':f'telegram://{k}','site':'telegram','recorded_at':datetime.now(timezone.utc).isoformat()})
+
+def seen(k):
+    return bool(sb('GET','price_history',params={'select':'recorded_at','product_url':f'eq.telegram://{k}','limit':'1'}))
+
+
+def remember(k):
+    sb('POST','price_history',json={'price':0,'product_url':f'telegram://{k}','site':'telegram','recorded_at':datetime.now(timezone.utc).isoformat()})
+
 
 def save(s,u,t,c,p):
-    now=datetime.now(timezone.utc).isoformat(); rows=sb('GET','products',params={'select':'*','product_url':f'eq.{u}','limit':'1'}); payload={'product_name':t,'current_price':c,'previous_price':p,'product_url':u,'site':s,'updated_at':now}
+    now=datetime.now(timezone.utc).isoformat(); rows=sb('GET','products',params={'select':'*','product_url':f'eq.{u}','limit':'1'})
+    payload={'product_name':t,'current_price':c,'previous_price':p,'product_url':u,'site':s,'updated_at':now}
     if rows:sb('PATCH',f'products?id=eq.{rows[0]["id"]}',json=payload);return rows[0]
     return (sb('POST','products',json=payload) or [payload])[0]
+
 
 def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     if not valid(s,u):return False
@@ -193,15 +268,15 @@ def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     if signal:lines += ['', '📌 '+re.sub(r'\s+',' ',signal)[:260]]
     lines += ['','👇 Fırsata git']
     payload={'chat_id':CHAT,'text':'\n'.join(lines),'disable_web_page_preview':False,'reply_markup':{'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}}
-    requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json=payload,timeout=15).raise_for_status();sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()});remember(key)
-    print(f'GÖNDERİLDİ | {s} | {t[:70]} | {c:.2f} | kaynak={source} | link={u}');return True
+    requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json=payload,timeout=10).raise_for_status()
+    sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()});remember(key)
+    print(f'GÖNDERİLDİ | {s} | {t[:70]} | {c:.2f} | kaynak={source} | link={u}')
+    return True
 
-def parse(block,page,coupons):
+
+def parse(block,source,coupons,page):
     tm=block.select_one('time[datetime]'); node=block.select_one('.tgme_widget_message_text')
     if not tm or not node:return None
-    try:dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
-    except:return None
-    if abs(datetime.now(timezone.utc)-dt)>timedelta(minutes=MAX_AGE):return None
     raw=node.get_text('\n',strip=True); lines=[x.strip() for x in raw.splitlines() if x.strip()]
     hint=next((s for s in MARKET.values() if re.search(r'\b'+re.escape(s)+r'\b',raw,re.I)),None)
     title='Ürün'
@@ -209,52 +284,74 @@ def parse(block,page,coupons):
         if re.search(r'(TL|₺|yerine|kupon|kod(?:u)?|sepette|indirim|kampanya|FIRSATA GİT)',line,re.I) or line.startswith(('http','#')):continue
         title=re.sub(r'^[^A-Za-zÇĞİÖŞÜ0-9]+','',line).strip()
         if len(title)>=4:break
-    links=[]
+    signal=' | '.join(x for x in lines[1:] if re.search(r'en düşük|son \d+|dip|ortalama|düştü|sepette|kupon|kod(?:u)?|kampanya|indirim|aktif|2 al 1|3 al 2|4 al 3|ödeme anında|%\s*\d+',x,re.I))[:500]
+    coupon_hint=match_coupon(hint,title,raw,coupons) if hint else None
+    current,previous=source_pair(raw)
+    candidates=[]
     for a in block.select('a[href]'):
         original=clean(a.get('href',''))
         if not original.startswith('http'):continue
         s=site(original) or hint
         if s not in MARKET.values():continue
-        resolved=resolve(page,original,s,title)
-        if resolved and valid(s,resolved) and resolved not in [x[1] for x in links]:links.append((s,resolved))
+        candidates.append((s,original))
+    # Hizli yol: kisa/yonlendirme linklerini HTTP ile cozumle.
+    links=[]
+    for s,original in candidates:
+        resolved=resolve(page,original,s,title,allow_browser=False)
+        if resolved and valid(s,resolved):links.append((s,resolved))
     if not links and hint:
-        found=search_marketplace(page,hint,title)
+        found=search_marketplace_http(hint,title)
         if found:links.append((hint,found))
+    # Sadece guclu adaylarda pahali browser fallback.
+    strong=bool(previous or coupon_hint or DEAL_WORDS.search(signal or ''))
+    if not links and strong:
+        for s,original in candidates:
+            resolved=resolve(page,original,s,title,allow_browser=True)
+            if resolved and valid(s,resolved):links.append((s,resolved));break
     if not links:return None
-    current,previous=source_pair(raw); s,u=links[0]
+    s,u=links[0]
+    coupon=coupon_hint or match_coupon(s,title,raw,coupons)
+    # Kaynak eski/yeni fiyat vermisse marketplace'ten hizli dogrulama yap.
     if current:
-        mc,mp=marketplace_price_check(page,s,u,current)
+        mc,mp=marketplace_price_check(s,u,current)
         if mc is not None:current=mc
         if mp is not None:previous=mp
     if current is None:return None
-    post_id=block.get('data-post','').split('/')[-1]
-    if not post_id.isdigit():return None
-    signal=' | '.join(x for x in lines[1:] if re.search(r'en düşük|son \d+|dip|ortalama|düştü|sepette|kupon|kod(?:u)?|kampanya|indirim|aktif|2 al 1|3 al 2|4 al 3|ödeme anında|%\s*\d+',x,re.I))[:500]
-    coupon=match_coupon(s,title,raw,coupons)
     verified_discount=previous and previous>current and (previous-current)/previous*100>=MIN_DISCOUNT
     if not verified_discount and not coupon and not DEAL_WORDS.search(signal):return None
+    post_id=block.get('data-post','').split('/')[-1]
+    if not post_id.isdigit():return None
     return s,u,title[:300],current,previous,post_id,signal,coupon
 
+
 def main():
-    print('=== Telegram fırsat keşfi başladı ==='); candidates=[]; sent=0; coupons=collect_coupons(); print(f'Anlık kupon hafızası: {len(coupons)} aktif aday')
+    started=datetime.now(timezone.utc)
+    print('=== Hızlı Telegram fırsat keşfi başladı ===')
+    fetched=[]
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as ex:
+        futures=[ex.submit(fetch_source,item) for item in SOURCES.items()]
+        for f in as_completed(futures):fetched.append(f.result())
+    all_blocks=[]; coupons=[]
+    for source,r in fetched:
+        print(f'Telegram kaynak {source}: HTTP {r.status_code if r else "HATA"}')
+        blocks,cps=extract_blocks(source,r); all_blocks.extend((source,b) for b in blocks); coupons.extend(cps)
+        print(f'  yeni mesaj={len(blocks)}')
+    print(f'Anlık kupon adayları: {len(coupons)}')
+    candidates=[]; sent=0
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True,args=['--no-sandbox']); page=browser.new_page(); page.set_default_timeout(15000)
+        browser=pw.chromium.launch(headless=True,args=['--no-sandbox']); page=browser.new_page(); page.set_default_timeout(9000)
         try:
-            for source,channel in SOURCES.items():
-                try:r=requests.get(f'https://t.me/s/{channel}',headers=HEAD,timeout=20)
-                except Exception as e:print(f'Telegram kaynak hata {source}: {type(e).__name__}: {e}');continue
-                print(f'Telegram kaynak {source}: HTTP {r.status_code}')
-                if r.status_code>=400:continue
-                for block in BeautifulSoup(r.text,'html.parser').select('.tgme_widget_message'):
-                    try:item=parse(block,page,coupons)
-                    except Exception as e:print(f'Parse hata {source}: {type(e).__name__}: {e}');continue
+            for source,block in all_blocks:
+                try:
+                    item=parse(block,source,coupons,page)
                     if item:
-                        candidates.append((source,item)); print(f'Aday: {item[0]} | {item[2][:80]} | {item[3]:.2f} TL | kaynak={source} | eski={item[4]}')
+                        candidates.append((source,item));print(f'Aday: {item[0]} | {item[2][:80]} | {item[3]:.2f} TL | kaynak={source} | eski={item[4]}')
+                except Exception as e:print(f'Parse hata {source}: {type(e).__name__}: {e}')
         finally:browser.close()
     for source,item in candidates:
-        try:
-            sent += 1 if send(item[0],item[1],item[2],item[3],item[4],source,item[5],item[6],item[7]) else 0
+        try:sent += 1 if send(item[0],item[1],item[2],item[3],item[4],source,item[5],item[6],item[7]) else 0
         except Exception as e:print(f'Ürün işlem hata {source}: {type(e).__name__}: {e}')
-    print(f'=== Telegram fırsat keşfi bitti. Aday={len(candidates)} Gönderilen={sent} ===')
+    elapsed=(datetime.now(timezone.utc)-started).total_seconds()
+    print(f'=== Bitti. Mesaj={len(all_blocks)} Aday={len(candidates)} Gönderilen={sent} Süre={elapsed:.1f}s ===')
 
 if __name__=='__main__':main()
