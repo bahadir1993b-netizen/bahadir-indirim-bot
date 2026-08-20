@@ -17,25 +17,33 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     title=extract_title(t)
     if re.search(r'\b(kitap|kitapları|roman|dergi|magazin|e-kitap|ebook|yayınevi|yayıncılık)\b',title,re.I):
         print(f'ATLANDI | {source}:{post_id} | kitap kategorisi'); remember(key); return False
+    campaign=bool(re.search(r'\b\d+\s*al\s*\d+\s*öde\b',t or '',re.I) or re.search(r'(?:adet|ürün|parça)\s*başı',t or '',re.I))
+    special=bool(coupon or campaign)
     disc=(p-c)/p*100 if p and p>c else None
     if disc is not None and disc<MIN_DISCOUNT: print(f'ATLANDI | {source}:{post_id} | %{disc:.1f} < %{MIN_DISCOUNT}'); remember(key); return False
-    if disc is None and not coupon and not DEAL_WORDS.search(signal or ''): print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok'); remember(key); return False
-    # Kaynak mesajındaki fiyatın birkaç dakika içinde değişmesini engellemek için ürünü tekrar aç.
+    if disc is None and not special and not DEAL_WORDS.search(signal or ''): print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok'); remember(key); return False
     try:
         live_current, live_old = marketplace_price_check(s,u,c)
         if live_current is None:
             print(f'ATLANDI | {source}:{post_id} | canlı fiyat okunamadı'); return False
-        drift=abs(live_current-c)/max(c,1)
-        if drift>0.05:
-            print(f'ATLANDI | {source}:{post_id} | fiyat değişti | kaynak={c:.2f} | canlı={live_current:.2f} | fark=%{drift*100:.1f}'); remember(key); return False
-        c=live_current
+        if special:
+            if c > live_current*1.05:
+                print(f'ATLANDI | {source}:{post_id} | kampanya fiyatı canlı fiyattan yüksek | kaynak={c:.2f} | canlı={live_current:.2f}'); remember(key); return False
+            if live_current > c*1.02:
+                p=live_current; disc=(p-c)/p*100
+            else:
+                c=live_current
+        else:
+            drift=abs(live_current-c)/max(c,1)
+            if drift>0.05:
+                print(f'ATLANDI | {source}:{post_id} | fiyat değişti | kaynak={c:.2f} | canlı={live_current:.2f} | fark=%{drift*100:.1f}'); remember(key); return False
+            c=live_current
     except Exception as e:
         print('CANLI FİYAT KONTROL HATA',e); return False
     market_ref=None
-    if s=='Amazon':
+    if s=='Amazon' and not special:
         try:
-            q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split()); words=q.split()
-            queries=[' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]; best=[]
+            q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split()); words=q.split(); queries=[' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]; best=[]
             for qq in queries:
                 if not qq: continue
                 r=requests.get('https://www.akakce.com/arama/?q='+requests.utils.quote(qq),headers=HEAD,timeout=7)
@@ -46,13 +54,10 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
                     if x and x>1: vals.append(x)
                 if vals: best.append(min(vals))
             if best:
-                market_ref=min(best)
-                market_disc=(market_ref-c)/market_ref*100 if market_ref>c else 0
+                market_ref=min(best); market_disc=(market_ref-c)/market_ref*100 if market_ref>c else 0
                 if market_disc < MIN_DISCOUNT:
-                    print(f'ATLANDI | {source}:{post_id} | piyasa indirimi yetersiz | mevcut={c:.2f} | Akakçe={market_ref:.2f} | %{market_disc:.1f}')
-                    remember(key); return False
+                    print(f'ATLANDI | {source}:{post_id} | piyasa indirimi yetersiz | mevcut={c:.2f} | Akakçe={market_ref:.2f} | %{market_disc:.1f}'); remember(key); return False
                 p=market_ref; disc=market_disc
-                print(f'AKAKÇE REFERANS | mevcut={c:.2f} | piyasa={market_ref:.2f} | gerçek indirim=%{disc:.1f}')
         except Exception as e: print('AKAKCE KONTROL HATA',e)
     row=save(s,u,title,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None
     if last:
@@ -86,4 +91,4 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
 '''
 s,n=re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()',lambda m:new_send.rstrip()+'\n',s,count=1,flags=re.S)
 if n!=1:raise SystemExit('send bulunamadı')
-P.write_text(s,encoding='utf-8'); print('Telegram patch: canlı fiyat drift kontrolü + sıkı Akakçe + gerçek görsel yükleme')
+P.write_text(s,encoding='utf-8'); print('Telegram patch: kupon/kampanya canlı fiyat doğrulaması düzeltildi')
