@@ -5,11 +5,10 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
-# 5 dakikalık taramalar birbirini iptal etmesin.
-# Supabase dedup mekanizması aynı fırsatın tekrar paylaşılmasını engeller.
-concurrency:
-  group: bahadir-indirim-scanner
-  cancel-in-progress: false
+# DİKKAT: concurrency bilinçli olarak kullanılmıyor.
+# GitHub Actions concurrency grubunda aynı anda 1 çalışan + 1 bekleyen run tutulur;
+# 5 dakikalık scheduler'da uzun süren taramalar yüzünden ara schedule run'ları kaybolabilir.
+# Supabase dedup aynı fırsatın tekrar paylaşılmasını zaten engelliyor.
 
 jobs:
   run-bot:
