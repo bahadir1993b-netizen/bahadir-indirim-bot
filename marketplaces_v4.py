@@ -3,11 +3,12 @@ from datetime import datetime,timezone,timedelta
 from urllib.parse import quote,urlparse,unquote,urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
-TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; SB=os.environ['SUPABASE_URL'].rstrip('/'); KEY=os.environ['SUPABASE_SERVICE_KEY']
-CHAT='-1004424116637'; MIN_DISCOUNT=10.0; COOLDOWN=12; HISTORY_DAYS=90; MAX_PRODUCTS=12
+TOKEN=os.environ['TELEGRAM_BOT_TOKEN'];SB=os.environ['SUPABASE_URL'].rstrip('/');KEY=os.environ['SUPABASE_SERVICE_KEY']
+APPS=os.environ.get('APPS_SCRIPT_URL','').strip()
+CHAT='-1004424116637';MIN_DISCOUNT=10.0;COOLDOWN=12;HISTORY_DAYS=90;MAX_PRODUCTS=12
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
-SEARCHES={'Hepsiburada':'https://www.hepsiburada.com/ara?q={}','Trendyol':'https://www.trendyol.com/sr?q={}'}
 SITES={'Hepsiburada':'hepsiburada.com','Trendyol':'trendyol.com'}
+SEARCHES={'Hepsiburada':'https://www.hepsiburada.com/ara?q={}','Trendyol':'https://www.trendyol.com/sr?q={}'}
 TERMS=['indirim','fırsat','kampanya','telefon','laptop','televizyon','kulaklık','elektronik','oyuncu','ev yaşam']
 def sb(method,path,**kw):
  h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
@@ -25,10 +26,14 @@ def price(v):
   x=float(s);return x if 0<x<10000000 else None
  except:return None
 def prices(t):
- return [x for m in re.finditer(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)',t or '',re.I) if (x:=price(m.group(1))) is not None]
+ out=[]
+ for m in re.finditer(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)',t or '',re.I):
+  x=price(m.group(1));
+  if x is not None:out.append(x)
+ return out
 def valid(site,u):
- u=unquote(u or '').replace('\\/','/');p=urlparse(u);host=p.netloc.lower()
- if SITES[site] not in host:return False
+ u=unquote(u or '').replace('\\/','/');p=urlparse(u)
+ if SITES[site] not in p.netloc.lower():return False
  return bool(re.search(r'-p-'+(r'\d+' if site=='Trendyol' else r'[A-Za-z0-9]+')+r'(?:[/?#&]|$)',p.path,re.I))
 def clean(site,u):
  u=htmlmod.unescape(unquote(u or '')).replace('\\/','/').strip('"\'<> ')
@@ -38,38 +43,46 @@ def clean(site,u):
  p=urlparse(u)
  if not valid(site,u):return None
  return 'https://www.'+SITES[site]+p.path.rstrip('/')
+def apps_script_search(site,term):
+ if not APPS:return []
+ try:
+  r=requests.get(APPS,params={'site':site,'q':term},headers=HEAD,timeout=25)
+  print(f'{site} Apps Script [{term}] HTTP: {r.status_code}')
+  data=r.json()
+  if not data.get('ok'):print(f'{site} Apps Script hata: {data.get("error")}');return []
+  out=[];seen=set()
+  for x in data.get('products',[]):
+   u=clean(site,x.get('url',''))
+   if u and u not in seen:
+    seen.add(u);out.append((u,x.get('title') or 'Ürün',[]));print(f'{site} Apps Script adayı: {x.get("title","Ürün")[:80]} | {u}')
+  return out[:MAX_PRODUCTS]
+ except Exception as e:print(f'{site} Apps Script hata: {type(e).__name__}: {e}');return []
 def search_fallback(site,term):
- q=quote(f'site:{SITES[site]} {term}')
- out=[];seen=set()
- # Bing RSS
+ q=quote(f'site:{SITES[site]} {term}');out=[];seen=set()
  for endpoint,kind in [(f'https://www.bing.com/search?format=rss&q={q}&count=30','BingRSS'),(f'https://html.duckduckgo.com/html/?q={q}','DDG')]:
   try:
    r=requests.get(endpoint,headers=HEAD,timeout=15);print(f'{site} {kind} [{term}] HTTP: {r.status_code}')
    if r.status_code>=400:continue
    if kind=='BingRSS':
-    root=ET.fromstring(r.content);items=root.findall('.//item')
-    for item in items:
-     raw=' '.join([item.findtext('link') or '',item.findtext('description') or ''])
-     title=htmlmod.unescape(item.findtext('title') or 'Ürün')
-     urls=re.findall(r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^\s"<>]+',htmlmod.unescape(raw),re.I)
-     for rawu in urls:
+    root=ET.fromstring(r.content)
+    for item in root.findall('.//item'):
+     raw=' '.join([item.findtext('link') or '',item.findtext('description') or '']);title=htmlmod.unescape(item.findtext('title') or 'Ürün')
+     for rawu in re.findall(r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^\s"<>]+',htmlmod.unescape(raw),re.I):
       u=clean(site,rawu)
-      if u and u not in seen:
-       seen.add(u);out.append((u,re.sub(r'\s+',' ',title).strip()[:300],prices(raw)));print(f'{site} arama adayı: {title[:80]} | {u}')
+      if u and u not in seen:seen.add(u);out.append((u,title[:300],prices(raw)))
    else:
     soup=BeautifulSoup(r.text,'html.parser')
-    for a in soup.select('a.result__a, a[href]'):
-     raw=htmlmod.unescape(unquote(a.get('href','')))
-     urls=re.findall(r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^\s"<>]+',raw,re.I)
-     text=a.get_text(' ',strip=True) or 'Ürün'
-     for rawu in urls:
+    for a in soup.select('a.result__a,a[href]'):
+     raw=htmlmod.unescape(unquote(a.get('href','')));text=a.get_text(' ',strip=True) or 'Ürün'
+     for rawu in re.findall(r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^\s"<>]+',raw,re.I):
       u=clean(site,rawu)
-      if u and u not in seen:
-       seen.add(u);out.append((u,text[:300],prices(text)));print(f'{site} DDG adayı: {text[:80]} | {u}')
+      if u and u not in seen:seen.add(u);out.append((u,text[:300],prices(text)))
    if len(out)>=MAX_PRODUCTS:return out[:MAX_PRODUCTS]
   except Exception as e:print(f'{site} {kind} hata: {type(e).__name__}: {e}')
  return out[:MAX_PRODUCTS]
 def direct_search(site,term,page):
+ apps=apps_script_search(site,term)
+ if apps:return apps
  url=SEARCHES[site].format(quote(term));out=[];seen=set()
  try:
   r=page.goto(url,wait_until='domcontentloaded',timeout=15000);status=r.status if r else 0;print(f'{site} direkt arama [{term}] HTTP: {status}')
@@ -83,10 +96,10 @@ def direct_search(site,term,page):
      text=a.inner_text(timeout=200).strip() or a.get_attribute('title') or 'Ürün';block=text
      try:block=a.locator('xpath=..').inner_text(timeout=200).strip() or text
      except:pass
-     seen.add(u);out.append((u,re.sub(r'\s+',' ',text)[:300],prices(block)));print(f'{site} direkt aday: {text[:80]} | fiyatlar={prices(block)[:4]} | {u}')
+     seen.add(u);out.append((u,re.sub(r'\s+',' ',text)[:300],prices(block)))
      if len(out)>=MAX_PRODUCTS:return out
     except:pass
-  else: print(f'{site} direkt arama engellendi; arama motoru fallback devreye giriyor')
+  else:print(f'{site} direkt arama engellendi; arama motoru fallback devreye giriyor')
  except Exception as e:print(f'{site} direkt arama hata: {type(e).__name__}: {e}')
  return search_fallback(site,term)
 def jsonld(html):
@@ -113,7 +126,7 @@ def product_page(site,url,title,snip,browser):
   if not r or status>=400:return None
   p.wait_for_timeout(900);html=p.content();name,jd=jsonld(html);cur=None
   sels=['meta[property="product:price:amount"]','meta[itemprop="price"]']
-  sels += ['[data-testid="price-current"]','[class*="prc-dsc"]','[class*="price-current"]'] if site=='Trendyol' else ['[data-test-id="price-current"]','[data-test-id="current-price"]','[class*="product-price"]','[class*="current-price"]']
+  sels+=['[data-testid="price-current"]','[class*="prc-dsc"]','[class*="price-current"]'] if site=='Trendyol' else ['[data-test-id="price-current"]','[data-test-id="current-price"]','[class*="product-price"]','[class*="current-price"]']
   for sel in sels:
    try:
     loc=p.locator(sel)
