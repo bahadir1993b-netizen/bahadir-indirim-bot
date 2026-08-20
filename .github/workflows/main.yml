@@ -43,14 +43,7 @@ jobs:
           print(f"Supabase cevap: {r.text[:500]}")
           r.raise_for_status()
           PY
-      - name: Amazon botu
-        timeout-minutes: 8
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python run_bot.py
-      - name: Telegram kaynaklarından HB + Trendyol keşfi
+      - name: Telegram fırsat keşfi (Amazon + Hepsiburada + Trendyol)
         timeout-minutes: 8
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
