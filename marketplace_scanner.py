@@ -22,6 +22,7 @@ MARKETS={
 }
 QUERIES=['indirim','fırsat','kampanya','çok satan','elektronik','telefon','kulaklık','televizyon','ev yaşam','mutfak','kişisel bakım','bebek','oyuncak','spor','kozmetik']
 MONEY_RE=re.compile(r'(?<![A-ZÇĞİÖŞÜ])(?:\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)(?![A-ZÇĞİÖŞÜ])',re.I)
+BAD_PRICE_CONTEXT=re.compile(r'(?:kupon|kod|kazan[çc]|avantaj|indirim|tasarruf|kargo|shipping|aylık|ayda|/ay|x\s*ay|taksit|puan|cashback|bonus|hediye)',re.I)
 
 def sb(method,path,**kw):
  h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
@@ -40,7 +41,17 @@ def money(x):
   x=float(s); return x if 0<x<10000000 else None
  except:return None
 
-def prices(text):return [money(x.group()) for x in MONEY_RE.finditer(text or '') if money(x.group())]
+def prices(text,contextual=True):
+ out=[]
+ for m in MONEY_RE.finditer(text or ''):
+  x=money(m.group())
+  if not x:continue
+  if contextual:
+   ctx=(text[max(0,m.start()-42):min(len(text),m.end()+42)] or '')
+   if BAD_PRICE_CONTEXT.search(ctx):
+    continue
+  out.append(x)
+ return out
 
 def normalize(site,u):
  p=urlparse(u); q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower() not in TRACKING]
@@ -132,15 +143,18 @@ def verify(page,site,u,fallback_title,expected_current,expected_previous):
   if not current_vals:
    current_vals=prices(soup.get_text(' ',strip=True))[:50]
   if not current_vals:return None
-  current=min(current_vals,key=lambda x:abs(x-expected_current))
+  # Never choose a tiny coupon/installment/shipping value as the product price.
+  plausible=[x for x in current_vals if x>=max(1,expected_current*0.50)]
+  if not plausible: plausible=current_vals
+  current=min(plausible,key=lambda x:abs(x-expected_current))
   if abs(current-expected_current)/max(expected_current,1)>0.35:return None
   previous=max(old or [x for x in current_vals if x>current],default=None)
-  # If the marketplace product page does not expose the struck-through/list price,
-  # retain the old price already extracted from the marketplace search card.
   if not previous or previous<=current:previous=expected_previous
   if not previous or previous<=current:return None
   disc=(previous-current)/previous*100
   if disc<MIN_DISCOUNT:return None
+  # Sanity guard: a 99%+ drop is allowed only when the product page itself confirms it.
+  if disc>=95 and current<expected_current*0.5:return None
   return clean_title(title),current,previous,disc,image
  except Exception as e:
   print('VERIFY HATA',site,u,e); return None
