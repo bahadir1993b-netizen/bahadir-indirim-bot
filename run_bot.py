@@ -1,6 +1,7 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import quote
 from bs4 import BeautifulSoup
+import requests
 import bot
 
 _original_product_page = bot.product_page
@@ -11,22 +12,17 @@ def _clean_name(value):
 
 
 def _amazon_price_values(page, html):
-    """Amazon'da fiyatı parçalarından değil, güvenilir tam fiyat alanından oku."""
     values = []
-
-    # 1) Amazon'un tam fiyatı gösteren alanları.
     full_selectors = [
-        '.a-price .a-offscreen',
-        '#corePrice_feature_div .a-offscreen',
-        '.apexPriceToPay .a-offscreen',
-        'meta[property="product:price:amount"]',
-        'meta[itemprop="price"]',
+        '.a-price .a-offscreen', '#corePrice_feature_div .a-offscreen',
+        '.apexPriceToPay .a-offscreen', '#priceblock_ourprice',
+        '#priceblock_dealprice', '#priceblock_saleprice',
+        'meta[property="product:price:amount"]', 'meta[itemprop="price"]',
     ]
     for sel in full_selectors:
         try:
             loc = page.locator(sel)
-            n = min(loc.count(), 10)
-            for i in range(n):
+            for i in range(min(loc.count(), 10)):
                 raw = loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=400)
                 v = bot.price(raw)
                 if v is not None and 0 < v < 10000000:
@@ -34,14 +30,35 @@ def _amazon_price_values(page, html):
         except Exception:
             pass
 
-    # 2) Eğer tam fiyat alanı yoksa Amazon'un whole + fraction parçalarını BİRLİKTE oku.
-    # Örn. 3.739 + 91 -> 3739.91. Fraction tek başına asla fiyat kabul edilmez.
+    # Amazon bazen fiyatı DOM yerine JS JSON'u içinde taşır.
+    raw_patterns = [
+        r'"priceToPay"\s*:\s*\{[^{}]{0,500}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"priceAmount"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"ourPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"currentPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"displayPrice"\s*:\s*"([^" ]+)"',
+    ]
+    for pat in raw_patterns:
+        try:
+            for m in re.finditer(pat, html or '', re.I):
+                v = bot.price(m.group(1))
+                if v is not None and 0 < v < 10000000:
+                    values.append(v)
+        except Exception:
+            pass
+
+    try:
+        _, jd_prices = bot.jsonld_all(html)
+        values.extend(v for v in jd_prices if 0 < v < 10000000)
+    except Exception:
+        pass
+
+    # Whole + fraction birlikte. Fraction tek başına asla fiyat değildir.
     if not values:
         try:
             whole_loc = page.locator('.a-price-whole')
             frac_loc = page.locator('.a-price-fraction')
-            n = min(whole_loc.count(), 10)
-            for i in range(n):
+            for i in range(min(whole_loc.count(), 10)):
                 whole = whole_loc.nth(i).inner_text(timeout=400).strip()
                 frac = frac_loc.nth(i).inner_text(timeout=400).strip() if i < frac_loc.count() else '00'
                 whole_digits = re.sub(r'[^0-9]', '', whole)
@@ -52,28 +69,70 @@ def _amazon_price_values(page, html):
                         values.append(v)
         except Exception:
             pass
-
     return list(dict.fromkeys(values))
 
 
-def _amazon_previous_prices(page):
+def _amazon_previous_prices(page, html, current):
     values = []
-    selectors = [
-        '.a-text-price .a-offscreen',
-        '.priceBlockStrikePriceString',
-        '.basisPrice .a-offscreen',
-    ]
-    for sel in selectors:
+    for sel in ['.a-text-price .a-offscreen', '.priceBlockStrikePriceString', '.basisPrice .a-offscreen', '#priceblock_listprice']:
         try:
             loc = page.locator(sel)
-            n = min(loc.count(), 10)
-            for i in range(n):
+            for i in range(min(loc.count(), 10)):
                 v = bot.price(loc.nth(i).inner_text(timeout=400))
-                if v is not None and 0 < v < 10000000:
+                if v is not None and current * 1.03 < v < 10000000:
                     values.append(v)
         except Exception:
             pass
+    for pat in [
+        r'"listPrice"\s*:\s*\{[^{}]{0,500}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"basisPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"wasPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+    ]:
+        try:
+            for m in re.finditer(pat, html or '', re.I):
+                v = bot.price(m.group(1))
+                if v is not None and current * 1.03 < v < 10000000:
+                    values.append(v)
+        except Exception:
+            pass
+    try:
+        _, jd_prices = bot.jsonld_all(html)
+        values.extend(v for v in jd_prices if current * 1.03 < v < 10000000)
+    except Exception:
+        pass
     return list(dict.fromkeys(values))
+
+
+def _amazon_search_prices(url, title):
+    """DOM fiyatı yoksa Amazon ASIN'i üzerinden arama sonucunu son çare kullan."""
+    m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
+    asin = m.group(1) if m else None
+    queries = [f'site:amazon.com.tr {asin} TL'] if asin else []
+    if title:
+        queries.append(f'site:amazon.com.tr "{title[:100]}" TL')
+    for qtext in queries:
+        try:
+            q = quote(qtext)
+            r = requests.get(f'https://www.google.com/search?q={q}&num=10', headers=bot.HEADERS, timeout=10)
+            if r.status_code >= 400:
+                continue
+            soup = BeautifulSoup(r.text, 'html.parser')
+            found = []
+            blocks = soup.select('div.MjjYud') or soup.find_all('a', href=True)
+            for block in blocks:
+                text = block.get_text(' ', strip=True) if hasattr(block, 'get_text') else str(block)
+                if asin and asin.lower() not in (text + ' ' + str(block)).lower():
+                    continue
+                found.extend(bot.prices(text))
+            found = sorted(set(v for v in found if 0 < v < 10000000))
+            if found:
+                cur = found[0]
+                prev = next((v for v in found if v > cur * 1.03), None)
+                print(f'Amazon arama son çare fiyatları: {found[:8]}')
+                return cur, prev
+        except Exception as e:
+            print(f'Amazon arama fiyatı hata: {type(e).__name__}: {e}')
+    return None, None
 
 
 def _jsonld_product_name(html):
@@ -87,7 +146,6 @@ def _jsonld_product_name(html):
 def product_page(site, url, title, browser, search_ps=None):
     if site != 'Amazon':
         return _original_product_page(site, url, title, browser, search_ps)
-
     page = browser.new_page()
     page.set_default_timeout(4500)
     page.set_default_navigation_timeout(15000)
@@ -95,47 +153,26 @@ def product_page(site, url, title, browser, search_ps=None):
         r = page.goto(url, wait_until='domcontentloaded')
         status = r.status if r else 0
         print(f'{site} ürün HTTP: {status} | {url}')
-
-        # Sayfa erişilemiyorsa mevcut arama fiyatı fallback olarak kullanılabilir.
         if not r or status >= 400:
-            if search_ps:
-                ps = sorted(set(v for v in search_ps if v is not None and v > 0))
-                if ps:
-                    cur = ps[0]
-                    prev = next((v for v in ps if v > cur * 1.03), None)
-                    print(f'{site} arama fiyatı kullanılıyor: {ps[:8]}')
-                    return {
-                        'name': _clean_name(title),
-                        'price': cur,
-                        'previous': prev,
-                        'url': bot.canonical(url),
-                        'site': site,
-                    }
+            cur, prev = _amazon_search_prices(url, title)
+            if cur:
+                return {'name': _clean_name(title), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
             return None
 
         page.wait_for_timeout(1500)
         html = page.content()
         current = _amazon_price_values(page, html)
-
         if not current:
+            print(f'{site} DOM/HTML fiyatı bulunamadı, arama son çare deneniyor | {url}')
+            cur, prev = _amazon_search_prices(url, title)
+            if cur:
+                return {'name': _clean_name(title), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
             print(f'{site} güvenilir tam fiyat bulunamadı | {url}')
             return None
 
-        # Birden fazla güvenilir alan varsa ilk alanlar aynı ürünün güncel fiyatını
-        # temsil eder. En küçük değeri körlemesine seçmiyoruz.
+        # Güvenilir tam fiyat alanlarında ilk değer güncel fiyat kabul edilir.
         cur = current[0]
-
-        previous = _amazon_previous_prices(page)
-        previous = [v for v in previous if v > cur * 1.03]
-        if not previous:
-            # JSON-LD içindeki fiyatlar bazı Amazon sayfalarında güncel fiyatı tekrarlar.
-            # Yalnızca güncel fiyattan belirgin yüksek olanı önceki fiyat adayı yap.
-            try:
-                _, jd_prices = bot.jsonld_all(html)
-                previous = [v for v in jd_prices if v > cur * 1.03]
-            except Exception:
-                previous = []
-
+        previous = _amazon_previous_prices(page, html, cur)
         prev = min(previous) if previous else None
         name = _jsonld_product_name(html) or title or 'Ürün'
         try:
@@ -144,16 +181,9 @@ def product_page(site, url, title, browser, search_ps=None):
                 name = og
         except Exception:
             pass
-
         print(f'{site} güvenilir fiyatlar: {[round(x, 2) for x in current[:8]]}')
         print(f'{site} fiyat: {cur:.2f} | önceki: {prev or 0:.2f}')
-        return {
-            'name': _clean_name(name),
-            'price': cur,
-            'previous': prev,
-            'url': bot.canonical(url),
-            'site': site,
-        }
+        return {'name': _clean_name(name), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
     except Exception as e:
         print(f'{site} ürün hata: {type(e).__name__}: {e}')
         return None
