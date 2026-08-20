@@ -65,6 +65,21 @@ def product_url(site,href):
     if not re.search(r'-p-[a-z0-9]+(?:/|$)',p.path,re.I):return None
     return f'https://{p.netloc.lower()}{p.path.rstrip("/")}'
 
+def link_context(link):
+    # Google changes result DOM structure frequently. Walk up several ancestors
+    # instead of relying on the old div.MjjYud selector.
+    try:
+        node=link
+        for _ in range(7):
+            text=re.sub(r'\s+',' ',node.inner_text(timeout=700)).strip()
+            if text and re.search(r'(?:TL|₺)',text,re.I):
+                ps=prices(text)
+                if ps:return text,ps
+            node=node.locator('xpath=..')
+        return '',[]
+    except Exception:
+        return '',[]
+
 def discover(site,page):
     domain=SITES[site]; found={}
     for term in TERMS:
@@ -74,19 +89,21 @@ def discover(site,page):
             print(f'{site} Google: {term}')
             page.goto(url,wait_until='domcontentloaded',timeout=20000)
             page.wait_for_timeout(1000)
-            # Read result containers first so price snippets stay attached to the right URL.
-            blocks=page.locator('div.MjjYud')
-            n=min(blocks.count(),25)
+
+            # Do not depend on Google's MjjYud class. Collect real product links
+            # and derive the price from their nearest result container.
+            links=page.locator('a[href]')
+            n=min(links.count(),200)
             for i in range(n):
-                b=blocks.nth(i); text=re.sub(r'\s+',' ',b.inner_text(timeout=1000)); ps=prices(text)
-                links=b.locator('a'); ln=min(links.count(),10)
-                for j in range(ln):
-                    href=links.nth(j).get_attribute('href'); u=product_url(site,href)
-                    if u and u not in found:
-                        title=links.nth(j).inner_text(timeout=500).strip() or text[:180]
-                        found[u]=(title[:250],ps)
-                        print(f'{site} aday: {title[:80]} | {ps[:5]} | {u}')
-                        if len(found)>=MAX_PRODUCTS:break
+                link=links.nth(i)
+                href=link.get_attribute('href')
+                u=product_url(site,href)
+                if not u or u in found:continue
+                text,ps=link_context(link)
+                if not ps:continue
+                title=link.inner_text(timeout=500).strip() or text[:180]
+                found[u]=(title[:250],ps)
+                print(f'{site} aday: {title[:80]} | {ps[:5]} | {u}')
                 if len(found)>=MAX_PRODUCTS:break
             if len(found)>=MAX_PRODUCTS:break
         except Exception as e: print(f'{site} arama hata: {type(e).__name__}: {e}')
