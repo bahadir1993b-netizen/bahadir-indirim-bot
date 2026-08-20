@@ -77,6 +77,7 @@ jobs:
           cycle=0
           while [ "$SECONDS" -lt "$end" ]; do
             cycle=$((cycle + 1))
+            cycle_start=$SECONDS
             echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
             python apply_priority_runtime_patch.py
             python apply_marketplace_runtime_patch.py
@@ -85,8 +86,10 @@ jobs:
             timeout 540s python marketplace_scanner.py || echo "Marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
             remaining=$((end - SECONDS))
             if [ "$remaining" -le 0 ]; then break; fi
-            sleep_for=600
-            if [ "$remaining" -lt "$sleep_for" ]; then sleep_for="$remaining"; fi
-            echo "Sonraki marketplace taraması ${sleep_for} saniye sonra."
+            elapsed=$((SECONDS - cycle_start))
+            sleep_for=$((600 - elapsed))
+            if [ "$sleep_for" -lt 0 ]; then sleep_for=0; fi
+            if [ "$sleep_for" -gt "$remaining" ]; then sleep_for="$remaining"; fi
+            echo "Sonraki marketplace turu ${sleep_for} saniye sonra."
             sleep "$sleep_for"
           done
