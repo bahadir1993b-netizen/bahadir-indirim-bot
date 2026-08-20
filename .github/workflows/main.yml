@@ -56,6 +56,8 @@ jobs:
         run: python apply_marketplace_runtime_patch.py
       - name: Scanner çıktı düzeltmeleri
         run: python apply_scanner_runtime_patch.py
+      - name: Scanner hız ve süre düzeltmesi
+        run: python apply_speed_runtime_patch.py
       - name: Bağımsız internet fiyat taraması
         timeout-minutes: 8
         env:
