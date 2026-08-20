@@ -4,7 +4,6 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    # Fırsat/reklam kanallarını bağımsız taramadan önce yakala.
     - cron: "*/5 * * * *"
 
 concurrency:
@@ -24,6 +23,8 @@ jobs:
           python-version: "3.12"
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
+      - name: Chromium kur
+        run: python -m playwright install --with-deps chromium
       - name: Telegram kaynak ve görsel düzeltmeleri
         run: python apply_telegram_runtime_patch.py
       - name: Telegram fırsat keşfi
