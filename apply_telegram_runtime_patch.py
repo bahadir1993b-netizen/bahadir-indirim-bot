@@ -9,13 +9,12 @@ new_extract = r'''def extract_title(raw):
     text = re.sub(r'(?i)\s*👉?\s*FIRSATA\s*G[İI]T.*$', '', raw or '')
     text = re.sub(r'(?i)\s*(?:GOOGLE\s*🔍?|#\w+|@\w+)\b', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip(' -•👉')
-    # Fiyat/kampanya bölümünden sonrasını ürün adından çıkar.
     text = re.split(r'\s*(?:🏷️|💰|\b\d[\d.,]*\s*(?:TL|₺))\b', text, maxsplit=1, flags=re.I)[0]
     text = re.sub(r'\s+', ' ', text).strip(' -•👉')
     return text[:180] if text else (raw or '')[:180]
 '''
 
-s2, n1 = re.subn(r'def extract_title\(raw\):.*?(?=\ndef process\()', new_extract.rstrip() + '\n', s, count=1, flags=re.S)
+s2, n1 = re.subn(r'def extract_title\(raw\):.*?(?=\ndef process\()', lambda m: new_extract.rstrip() + '\n', s, count=1, flags=re.S)
 if n1 != 1:
     raise SystemExit('extract_title fonksiyonu bulunamadı')
 
@@ -44,7 +43,6 @@ new_send = r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     lines += ['', '👇 Fırsata git']
     caption='\n'.join(lines)
 
-    # Mümkünse ürün sayfasındaki gerçek ürün görselini kullan.
     image=None
     try:
         r=requests.get(u,headers=HEAD,timeout=6)
@@ -78,7 +76,7 @@ new_send = r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     return True
 '''
 
-s3, n2 = re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()', new_send.rstrip() + '\n', s2, count=1, flags=re.S)
+s3, n2 = re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()', lambda m: new_send.rstrip() + '\n', s2, count=1, flags=re.S)
 if n2 != 1:
     raise SystemExit('send fonksiyonu bulunamadı')
 
