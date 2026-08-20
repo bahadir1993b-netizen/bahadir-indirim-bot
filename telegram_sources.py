@@ -17,20 +17,15 @@ SOURCES = {
     'EnesOzen': 'https://t.me/s/enesozen',
 }
 MARKET_HOSTS = ('amazon.com.tr', 'hepsiburada.com', 'trendyol.com')
-SHORT_HOSTS = ('app.hb.biz', 'hps.im', 'amzn.eu', 'amzn.to', 'tinyurl.com', 'ty.gl', 'onu.al', 'sl.n11.com', 'publicis.link')
+SHORT_HOSTS = (
+    'app.hb.biz', 'hps.im', 'amzn.eu', 'amzn.to', 'tinyurl.com', 'ty.gl',
+    'onu.al', 'sl.n11.com', 'publicis.link', 'link.amazon'
+)
 SITE_BY_HOST = {
     'amazon.com.tr': 'Amazon',
     'hepsiburada.com': 'Hepsiburada',
     'trendyol.com': 'Trendyol',
 }
-
-def resolve_url(url):
-    try:
-        r = requests.get(url, headers=HEAD, timeout=15, allow_redirects=True)
-        return r.url
-    except Exception as e:
-        print(f'Link çözme hata: {url} | {type(e).__name__}: {e}')
-        return url
 
 def site_from_url(url):
     host = urlparse(url).netloc.lower().replace('www.', '')
@@ -50,38 +45,82 @@ def valid_product_url(site, url):
         return host.endswith('trendyol.com') and bool(re.search(r'-p-\d+(?:[/?#&]|$)', path, re.I))
     return False
 
-def extract_links(source, html):
+def resolve_url_requests(url):
+    try:
+        r = requests.get(url, headers=HEAD, timeout=15, allow_redirects=True)
+        return r.url
+    except Exception as e:
+        print(f'Link requests çözme hata: {url} | {type(e).__name__}: {e}')
+        return url
+
+def resolve_url_playwright(page, url):
+    try:
+        page.goto(url, wait_until='domcontentloaded', timeout=20000)
+        page.wait_for_timeout(1200)
+        return page.url
+    except Exception as e:
+        print(f'Link Playwright çözme hata: {url} | {type(e).__name__}: {e}')
+        try:
+            return page.url
+        except Exception:
+            return url
+
+def resolve_short_url(page, url):
+    # Önce hızlı HTTP redirect denenir.
+    resolved = resolve_url_requests(url)
+    if site_from_url(resolved):
+        return resolved
+
+    # app.hb.biz / onu.al / link.amazon gibi kısa linkler JS ile yönlenebiliyor.
+    host = urlparse(url).netloc.lower().replace('www.', '')
+    if host in SHORT_HOSTS:
+        return resolve_url_playwright(page, url)
+    return resolved
+
+def extract_links(source, html, browser):
     soup = BeautifulSoup(html, 'html.parser')
     out = []
     seen = set()
-    for a in soup.select('a[href]'):
-        href = htmlmod.unescape(a.get('href', '')).replace('\\/', '/')
-        href = urljoin(source, href)
-        if not href.startswith('http'):
-            continue
-        host = urlparse(href).netloc.lower().replace('www.', '')
-        if host not in MARKET_HOSTS and not any(host == x or host.endswith('.' + x) for x in SHORT_HOSTS):
-            continue
-        resolved = resolve_url(href)
-        site = site_from_url(resolved)
-        if not site or not valid_product_url(site, resolved):
-            continue
-        clean = resolved.split('#', 1)[0].rstrip('/')
-        if clean not in seen:
+    page = browser.new_page()
+    page.set_default_timeout(20000)
+    try:
+        for a in soup.select('a[href]'):
+            href = htmlmod.unescape(a.get('href', '')).replace('\\/', '/')
+            href = urljoin(source, href)
+            if not href.startswith('http'):
+                continue
+
+            host = urlparse(href).netloc.lower().replace('www.', '')
+            is_market = host in MARKET_HOSTS or any(host == x or host.endswith('.' + x) for x in SHORT_HOSTS)
+            if not is_market:
+                continue
+
+            resolved = resolve_short_url(page, href)
+            site = site_from_url(resolved)
+            if not site or not valid_product_url(site, resolved):
+                continue
+
+            clean = resolved.split('#', 1)[0].rstrip('/')
+            if clean in seen:
+                continue
             seen.add(clean)
             title = a.get_text(' ', strip=True) or 'Ürün'
             out.append((site, clean, title[:300]))
-        if len(out) >= MAX_PRODUCTS * 3:
-            break
+            print(f'  Link çözüldü: {site} | {clean}')
+
+            if len(out) >= MAX_PRODUCTS * 3:
+                break
+    finally:
+        page.close()
     return out
 
-def scan_source(name, url):
+def scan_source(name, url, browser):
     try:
         r = requests.get(url, headers=HEAD, timeout=20)
         print(f'Telegram kaynak {name}: HTTP {r.status_code}')
         if r.status_code >= 400:
             return []
-        return extract_links(url, r.text)
+        return extract_links(url, r.text, browser)
     except Exception as e:
         print(f'Telegram kaynak {name} hata: {type(e).__name__}: {e}')
         return []
@@ -90,23 +129,23 @@ def main():
     print('=== Telegram kaynak keşfi başladı ===')
     candidates = []
     seen = set()
-    for name, url in SOURCES.items():
-        for site, product_url, title in scan_source(name, url):
-            key = (site, product_url)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append((site, product_url, title, name))
-            print(f'Aday: {site} | {title[:80]} | {product_url} | kaynak={name}')
-            if len(candidates) >= MAX_PRODUCTS * 2:
-                break
-
-    sent = 0
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=['--no-sandbox'])
+
+        for name, url in SOURCES.items():
+            for site, product_url, title in scan_source(name, url, browser):
+                key = (site, product_url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append((site, product_url, title, name))
+                print(f'Aday: {site} | {title[:80]} | {product_url} | kaynak={name}')
+                if len(candidates) >= MAX_PRODUCTS * 2:
+                    break
+
+        sent = 0
         for site, url, title, source in candidates:
             if site not in ('Hepsiburada', 'Trendyol'):
-                # Amazon mevcut ayrı akışta doğrulanıyor; burada HB/Trendyol'a odaklanıyoruz.
                 continue
             p = product_page(site, url, title, [], browser)
             if not p:
@@ -117,6 +156,7 @@ def main():
                     print(f'Gönderildi: {site} | {p["title"][:80]} | kaynak={source}')
             except Exception as e:
                 print(f'İşlem hata: {type(e).__name__}: {e}')
+
         browser.close()
     print(f'=== Telegram kaynak keşfi bitti. Aday={len(candidates)} Gönderilen={sent} ===')
 
