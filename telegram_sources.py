@@ -5,11 +5,11 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; SB=os.environ['SUPABASE_URL'].rstrip('/'); KEY=os.environ['SUPABASE_SERVICE_KEY']
-CHAT='-1004424116637'; MAX_AGE=20; MIN_DISCOUNT=10.0; COOLDOWN=12
+CHAT='-1004424116637'; MAX_AGE=180; MIN_DISCOUNT=10.0; COOLDOWN=12
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
 SOURCES={'OnuAl':'onual_firsat','EnesOzen':'enesozen'}
 MARKET={'amazon.com.tr':'Amazon','hepsiburada.com':'Hepsiburada','trendyol.com':'Trendyol'}
-SHORT={'app.hb.biz':'Hepsiburada','hps.im':'Hepsiburada','ty.gl':'Trendyol','tyml.gl':'Trendyol','link.amazon':'Amazon','amzn.to':'Amazon','amzn.eu':'Amazon','publicis.link':None,'onu.al':None}
+SHORT={'app.hb.biz':'Hepsiburada','hps.im':'Hepsiburada','ty.gl':'Trendyol','tyml.gl':'Trendyol','link.amazon':'Amazon','amzn.to':'Amazon','amzn.eu':'Amazon','publicis.link':None,'onu.al':None,'sl.n11.com':None}
 
 def sb(method,path,**kw):
  h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
@@ -29,7 +29,6 @@ def money(s):
  except:return None
 
 MONEY_RE=re.compile(r'(?<![A-ZÇĞİÖŞÜ])(?:\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺)(?![A-ZÇĞİÖŞÜ])',re.I)
-
 def prices(text):return [money(m.group(0)) for m in MONEY_RE.finditer(text or '') if money(m.group(0)) is not None]
 
 def extract_price_pair(text):
@@ -54,13 +53,20 @@ def valid(site,u):
  return False
 
 def resolve(page,u):
+ original=u
  try:
   r=requests.get(u,headers=HEAD,timeout=10,allow_redirects=True);u=r.url
  except:pass
  s=site_url(u)
- if s and valid(s,u):return u
- if urlparse(u).netloc.lower().replace('www.','') in SHORT:
-  try:page.goto(u,wait_until='domcontentloaded',timeout=15000);page.wait_for_timeout(1000);return page.url
+ if s and valid(s,u):
+  print(f'Link çözüldü: {s} | {clean(u)}');return u
+ host=urlparse(original).netloc.lower().replace('www.','')
+ if host in SHORT or host.endswith('.onu.al') or host.endswith('.publicis.link'):
+  try:
+   page.goto(original,wait_until='domcontentloaded',timeout=15000);page.wait_for_timeout(1200);final=page.url
+   s=site_url(final)
+   if s and valid(s,final):
+    print(f'Link çözüldü: {s} | {clean(final)}');return final
   except:pass
  return u
 
@@ -103,15 +109,17 @@ def parse(block,channel,page):
  if not tm:return None
  try:dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
  except:return None
- if datetime.now(timezone.utc)-dt>timedelta(minutes=MAX_AGE):return None
+ age=datetime.now(timezone.utc)-dt
+ if age<timedelta(0) or age>timedelta(minutes=MAX_AGE):return None
  node=block.select_one('.tgme_widget_message_text')
  if not node:return None
  raw=node.get_text('\n',strip=True);links=[]
- for a in node.select('a[href]'):
+ # OnuAl'ın "Aç" bağlantısı mesaj metninin dışında; bu yüzden tüm mesaj bloğunu tarıyoruz.
+ for a in block.select('a[href]'):
   u=htmlmod.unescape(a.get('href',''))
   if not u.startswith('http'):continue
   host=urlparse(u).netloc.lower().replace('www.','')
-  if host not in MARKET and host not in SHORT:continue
+  if host not in MARKET and host not in SHORT and not host.endswith('.onu.al') and not host.endswith('.publicis.link'):continue
   r=resolve(page,u);s=site_url(r) or site_url(u)
   if s and valid(s,r):
    r=clean(r)
@@ -126,7 +134,7 @@ def parse(block,channel,page):
   if len(title)>=4:break
  post_id=block.get('data-post','').split('/')[-1]
  if not post_id.isdigit():return None
- signal=' | '.join(x for x in lines[1:] if re.search(r'en düşük|son \d+|dip|ortalama|düştü|sepette|kupon|kod(?:u)?|kampanya|indirim|aktif',x,re.I))[:500]
+ signal=' | '.join(x for x in lines[1:] if re.search(r'en düşük|son \d+|dip|ortalama|düştü|sepette|kupon|kod(?:u)?|kampanya|indirim|aktif|2 al 1|3 al 2|4 al 3',x,re.I))[:500]
  return site,url,title[:300],current,previous,post_id,signal
 
 def main():
