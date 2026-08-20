@@ -4,48 +4,33 @@ import re
 P = Path('telegram_sources.py')
 s = P.read_text(encoding='utf-8')
 
-# Kaynak sırası: yüksek sinyalli reklam/fırsat kanalları önce.
 new_sources = "SOURCES={'AmazonOzel':'amazonozel','IndirimAlarmi':'indirimalarmi_tr','YurticiFirsat':'yurticifirsat','FirsatDolu':'firsatdolu','IndirimBuluyoruz':'indirimbuldumtg','OzelFirsatlar':'ozelfirsat','FirsatMerkezi':'firsatmerkez','IndirimDeal':'indirimdeal','FirsatZ':'firsatz','OnuAl':'onual_firsat','EnesOzen':'enesozen'}"
 s, n = re.subn(r"SOURCES=\{.*?\}", new_sources, s, count=1, flags=re.S)
-if n != 1:
-    raise SystemExit('SOURCES bulunamadı')
-
-# Düşük eşik: %2 ve üzeri fırsatlar gönderilebilir.
+if n != 1: raise SystemExit('SOURCES bulunamadı')
 s = re.sub(r"MIN_DISCOUNT=6\.0", "MIN_DISCOUNT=2.0", s, count=1)
 s = re.sub(r"MAX_AGE=\d+", "MAX_AGE=45", s, count=1)
 if 'SOURCE_PRIORITY=True' not in s:
     s = s.replace('MAX_AGE=45', 'MAX_AGE=45\nSOURCE_PRIORITY=True\nSOURCE_LIMIT=12', 1)
 
-# Öncelikli kaynakları sırayla işlemek için executor.
 if '_PriorityExecutor' not in s:
     marker = "from playwright.sync_api import sync_playwright\n"
-    inject = '''from concurrent.futures import Future\n\nclass _PriorityExecutor:\n    def __init__(self, *args, **kwargs):\n        pass\n    def __enter__(self): return self\n    def __exit__(self, exc_type, exc, tb): return False\n    def submit(self, fn, *args, **kwargs):\n        f = Future()\n        try:\n            f.set_result(fn(*args, **kwargs))\n        except Exception as e:\n            f.set_exception(e)\n        return f\n\nThreadPoolExecutor = _PriorityExecutor\n'''
+    inject = '''from concurrent.futures import Future\n\nclass _PriorityExecutor:\n    def __init__(self, *args, **kwargs): pass\n    def __enter__(self): return self\n    def __exit__(self, exc_type, exc, tb): return False\n    def submit(self, fn, *args, **kwargs):\n        f=Future()\n        try: f.set_result(fn(*args, **kwargs))\n        except Exception as e: f.set_exception(e)\n        return f\n\nThreadPoolExecutor = _PriorityExecutor\n'''
     s = s.replace(marker, marker + inject, 1)
 
-s = s.replace("class _PriorityExecutor:\n    def __enter__", "class _PriorityExecutor:\n    def __init__(self, *args, **kwargs): pass\n    def __enter__")
-
-# Pazar yeri fiyatı okunamazsa kaynak mesajındaki fiyatı kullan.
-new_check = '''def marketplace_price_check(s,u,expected):\n    try:\n        r=requests.get(u,headers=HEAD,timeout=5)\n        if r.status_code < 400:\n            soup=BeautifulSoup(r.text,'html.parser'); vals=[]\n            for sel in ['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]','[data-price]']:\n                for el in soup.select(sel):\n                    x=money(el.get('content') or el.get('value') or el.get_text(' ',strip=True) or el.get('data-price'))\n                    if x: vals.append(x)\n            if vals and expected:\n                current=min(vals,key=lambda x:abs(x-expected))\n                if abs(current-expected)/max(expected,1)<=0.35:\n                    return current,max((x for x in vals if x>current),default=None)\n        if expected and 0 < expected < 10000000:\n            return expected,None\n    except Exception:\n        if expected and 0 < expected < 10000000:\n            return expected,None\n    return None,None\n'''
+new_check = '''def marketplace_price_check(s,u,expected):\n    try:\n        r=requests.get(u,headers=HEAD,timeout=5)\n        if r.status_code < 400:\n            soup=BeautifulSoup(r.text,'html.parser'); vals=[]\n            for sel in ['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]','[data-price]']:\n                for el in soup.select(sel):\n                    x=money(el.get('content') or el.get('value') or el.get_text(' ',strip=True) or el.get('data-price'))\n                    if x: vals.append(x)\n            if vals and expected:\n                current=min(vals,key=lambda x:abs(x-expected))\n                if abs(current-expected)/max(expected,1)<=0.35:\n                    return current,max((x for x in vals if x>current),default=None)\n        if expected and 0 < expected < 10000000: return expected,None\n    except Exception:\n        if expected and 0 < expected < 10000000: return expected,None\n    return None,None\n'''
 s, n = re.subn(r"def marketplace_price_check\(s,u,expected\):.*?(?=\ndef coupon_code\()", new_check, s, count=1, flags=re.S)
-if n != 1:
-    raise SystemExit('marketplace_price_check bulunamadı')
+if n != 1: raise SystemExit('marketplace_price_check bulunamadı')
 
-# Yalnızca açıkça etiketlenmiş kuponları kabul et; ayrıca 5 karakter altını alma.
-coupon_patch = '''def coupon_code(text):\n    pats=[\n        r'\\b(?:KOD|KODU|KUPON|KUPON KODU|PROMOSYON(?: KODU)?)\\s*[:=\\-]?\\s*([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\\b',\n        r'\\b([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\\s+(?:KOD(?:U)?|KUPON(?:U)?)\\b'\n    ]\n    bad={'INDIRIM','KAMPANYA','FIRSAT','AMAZON','HEPSIBURADA','TRENDYOL','UYLA','KOD','KUPON','PROMO'}\n    for pat in pats:\n        for m in re.finditer(pat,text or '',re.I):\n            code=m.group(1).upper()\n            if code in bad or code.isdigit() or not re.search(r'[A-ZÇĞİÖŞÜ]',code):\n                continue\n            return code\n    return None\n'''
-s, n = re.subn(r"def coupon_code\(text\):.*?(?=\ndef seen\()", coupon_patch, s, count=1, flags=re.S)
-if n != 1:
-    raise SystemExit('coupon_code bulunamadı')
+coupon_patch = '''def coupon_code(text):\n    pats=[\n        r'\\b(?:KOD|KODU|KUPON|KUPON KODU|PROMOSYON(?: KODU)?)\\s*[:=\\-]?\\s*([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\\b',\n        r'\\b([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\\s+(?:KOD(?:U)?|KUPON(?:U)?)\\b'\n    ]\n    bad={'INDIRIM','KAMPANYA','FIRSAT','AMAZON','HEPSIBURADA','TRENDYOL','UYLA','KOD','KUPON','PROMO'}\n    for pat in pats:\n        for m in re.finditer(pat,text or '',re.I):\n            code=m.group(1).upper()\n            if code in bad or code.isdigit() or not re.search(r'[A-ZÇĞİÖŞÜ]',code): continue\n            return code\n    return None\n'''
+s, n = re.subn(r"def coupon_code\(text\):.*?(?=\ndef seen\()", lambda m: coupon_patch, s, count=1, flags=re.S)
+if n != 1: raise SystemExit('coupon_code bulunamadı')
 
-# Kampanyalı efektif fiyat: "adet başı 226 TL", "3 adet ... 226 TL"
-# gibi ifadeler normal tekil fiyatın önüne geçer. Böylece 3 al 2 öde + kupon
-# kombinasyonları toplam avantaj üzerinden değerlendirilebilir.
-campaign_patch = r'''\ndef source_pair(t):\n    text=t or ''\n    # En güçlü sinyal: açıkça belirtilen adet başı/ürün başı fiyat.\n    unit_patterns=[\n        r'(?:adet|ürün|parça)\\s*başı\\s*[:=]?\\s*(\\d[\\d.,]*)\\s*(?:TL|₺)',\n        r'(?:adet|ürün|parça)\\s*(?:fiyatı|fiyati)\\s*[:=]?\\s*(\\d[\\d.,]*)\\s*(?:TL|₺)',\n        r'(?:3|4|5|6|2)\\s*\\s*adet.*?(\\d[\\d.,]*)\\s*(?:TL|₺)\\s*(?:\\(\\s*adet\\s*başı|/\\s*adet)'\n    ]\n    unit=None\n    for pat in unit_patterns:\n        m=re.search(pat,text,re.I|re.S)\n        if m:\n            unit=money(m.group(1))\n            if unit: break\n    p=prices(text)\n    # Mesajda açık bir indirim öncesi fiyat varsa onu koru.\n    old_current=None; old_previous=None\n    for pat in [\n        r'(\\d[\\d.,]*)\\s*(?:TL|₺)\\s+yerine\\s+(\\d[\\d.,]*)\\s*(?:TL|₺)',\n        r'(?:önceki|onceki|eski|liste|normal|normalde)\\s*[:=]?\\s*(\\d[\\d.,]*)\\s*(?:TL|₺).*?(?:şuan|şu an|simdi|şimdi|yeni)\\s*[:=]?\\s*(\\d[\\d.,]*)\\s*(?:TL|₺)'\n    ]:\n        m=re.search(pat,text,re.I|re.S)\n        if m:\n            a,b=money(m.group(1)),money(m.group(2))\n            if a and b:\n                old_current,old_previous=(b,a) if a>b else (a,b)\n                break\n    if unit:\n        # Unit price is the effective purchase price. Baseline olarak mesajdaki\n        # ilk makul fiyatı kullan; açık eski fiyat varsa onu tercih et.\n        baseline=old_previous\n        if not baseline:\n            candidates=[x for x in p if x and x>unit*1.02]\n            baseline=min(candidates,key=lambda x:abs(x-unit)) if candidates else None\n        return unit,baseline\n    if old_current is not None:return old_current,old_previous\n    return (p[0],None) if p else (None,None)\n'''
-s, n = re.subn(r"def source_pair\(t\):.*?(?=\ndef coupon_savings\()", campaign_patch, s, count=1, flags=re.S)
-if n != 1:
-    raise SystemExit('source_pair bulunamadı')
+campaign_patch = '''def source_pair(t):\n    text=t or ''\n    unit_patterns=[\n        r'(?:adet|ürün|parça)\\s*başı\\s*[:=]?\\s*(\\d[\\d.,]*)\\s*(?:TL|₺)',\n        r'(?:adet|ürün|parça)\\s*(?:fiyatı|fiyati)\\s*[:=]?\\s*(\\d[\\d.,]*)\\s*(?:TL|₺)',\n        r'(?:\\d+)\\s*adet.*?(\\d[\\d.,]*)\\s*(?:TL|₺)\\s*(?:\\(\\s*adet\\s*başı|/\\s*adet)'\n    ]\n    unit=None\n    for pat in unit_patterns:\n        m=re.search(pat,text,re.I|re.S)\n        if m:\n            unit=money(m.group(1))\n            if unit: break\n    p=prices(text)\n    if unit:\n        candidates=[x for x in p if x and x>unit*1.02]\n        baseline=min(candidates,key=lambda x:abs(x-unit)) if candidates else None\n        return unit,baseline\n    return (p[0],None) if p else (None,None)\n'''
+s, n = re.subn(r"def source_pair\(t\):.*?(?=\ndef coupon_savings\()", lambda m: campaign_patch, s, count=1, flags=re.S)
+if n != 1: raise SystemExit('source_pair bulunamadı')
 
 if "for b in blocks[:SOURCE_LIMIT]:" not in s:
     s = s.replace("for b in blocks:", "for b in blocks[:SOURCE_LIMIT]:")
 
 P.write_text(s, encoding='utf-8')
-print('Priority patch OK | %2 eşik | %45 yaş | kampanya/adet başı efektif fiyat | kupon filtresi | kaynak önceliği | canlı fiyat fallback')
+print('Priority patch OK | %2 | MAX_AGE 45 | adet başı efektif fiyat | kupon')
