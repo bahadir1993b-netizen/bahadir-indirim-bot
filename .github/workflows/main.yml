@@ -4,7 +4,7 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: bahadir-indirim-scanner
@@ -64,6 +64,7 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
           python apply_telegram_runtime_patch.py
+          sed -i 's/^MAX_AGE=.*/MAX_AGE=15/' telegram_sources.py
           python telegram_sources.py
       - name: Marketplace fiyat doğrulama düzeltmesi
         run: python apply_marketplace_runtime_patch.py
