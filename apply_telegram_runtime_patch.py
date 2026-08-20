@@ -22,10 +22,8 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     if disc is None and not coupon and not DEAL_WORDS.search(signal or ''): print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok'); remember(key); return False
     if s=='Amazon':
         try:
-            q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split())
-            # Uzun Amazon başlıklarını kademeli kısalt; önce marka/model + ilk anlamlı kelimelerle ara.
-            words=q.split(); queries=[' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]
-            best=[]
+            q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split()); words=q.split()
+            queries=[' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]; best=[]
             for qq in queries:
                 if not qq: continue
                 r=requests.get('https://www.akakce.com/arama/?q='+requests.utils.quote(qq),headers=HEAD,timeout=6)
@@ -37,10 +35,9 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
                 if vals: best.append(min(vals))
                 if best and min(best)<c*0.85: break
             if best and min(best)<c*0.85:
-                print(f'ATLANDI | {source}:{post_id} | Akakçe daha ucuz | Amazon={c:.2f} | Akakçe={min(best):.2f}')
-                remember(key); return False
+                print(f'ATLANDI | {source}:{post_id} | Akakçe daha ucuz | Amazon={c:.2f} | Akakçe={min(best):.2f}'); remember(key); return False
         except Exception as e: print('AKAKCE KONTROL HATA',e)
-    row=save(s,u,t,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None
+    row=save(s,u,title,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None
     if last:
         try:
             if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN): print(f'ATLANDI | {source}:{post_id} | cooldown'); remember(key); return False
@@ -48,25 +45,28 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else ('🎟️ KUPONLU FIRSAT' if coupon else '🔥 FIRSAT'),' ',f'🛍️ {title}',f'💰 {c:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.')]
     if p and p>c: lines.append(f'🏷️ Önceki: {p:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.'))
     if coupon: lines.append(f'🎟️ Kupon: {coupon}')
-    lines+=['','👇 Fırsata git']; caption='\n'.join(lines); image=None
+    lines+=['','👇 Fırsata git']; caption='\n'.join(lines); markup={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}; image=None
     try:
-        r=requests.get(u,headers=HEAD,timeout=6)
+        r=requests.get(u,headers=HEAD,timeout=7)
         if r.ok:
             soup=BeautifulSoup(r.text,'html.parser')
             for sel in ['meta[property="og:image"]','meta[name="twitter:image"]','meta[property="twitter:image"]']:
                 el=soup.select_one(sel)
                 if el and el.get('content'): image=clean(el.get('content')); break
     except: pass
-    markup={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
+    resp=None
     if image:
-        resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',json={'chat_id':CHAT,'photo':image,'caption':caption[:1024],'reply_markup':markup},timeout=15)
-        if not resp.ok: resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
-    else: resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
+        try:
+            ir=requests.get(image,headers=HEAD,timeout=10)
+            if ir.ok and len(ir.content)>1000:
+                resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',data={'chat_id':CHAT,'caption':caption[:1024],'reply_markup':__import__('json').dumps(markup,ensure_ascii=False)},files={'photo':('product.jpg',ir.content,'image/jpeg')},timeout=20)
+        except Exception as e: print('GÖRSEL HATA',e)
+    if not resp or not resp.ok:
+        resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
     resp.raise_for_status()
     if isinstance(row,dict) and row.get('id'): sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
     remember(key); print(f'GÖNDERİLDİ | {s} | {c:.2f} TL'+(f' | %{disc:.1f}' if disc is not None else '')); return True
 '''
 s,n=re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()',lambda m:new_send.rstrip()+'\n',s,count=1,flags=re.S)
 if n!=1:raise SystemExit('send bulunamadı')
-P.write_text(s,encoding='utf-8')
-print('Telegram patch güncellendi: kademeli Akakçe araması + fotoğraf + temiz başlık')
+P.write_text(s,encoding='utf-8'); print('Telegram patch: kaynak önceliği + kademeli Akakçe + gerçek görsel yükleme')
