@@ -94,6 +94,51 @@ def _amazon_previous_prices(page, html, current):
     return list(dict.fromkeys(values))
 
 
+def _search_exact_amazon_price(query, asin):
+    """Arama motoru fiyatını ancak aynı sonuç bloğu exact ASIN'i ve Amazon ürün linkini içeriyorsa kabul et."""
+    engines = [
+        f'https://www.google.com/search?q={quote(query)}&num=10&filter=0',
+        f'https://www.bing.com/search?q={quote(query)}&count=10',
+        f'https://search.yahoo.com/search?p={quote(query)}&n=10',
+    ]
+    asin = (asin or '').upper()
+    for url in engines:
+        try:
+            r = requests.get(url, headers=bot.HEADERS, timeout=12)
+            if r.status_code >= 400:
+                continue
+            soup = BeautifulSoup(r.text, 'html.parser')
+            blocks = soup.select('li.b_algo, div.MjjYud, div.g, div.yuRUbf, div.result, article')
+            for block in blocks:
+                text = block.get_text(' ', strip=True)
+                links = [a.get('href', '') for a in block.select('a[href]')]
+                blob = (text + ' ' + ' '.join(links)).upper()
+                if asin not in blob or 'AMAZON.COM.TR' not in blob:
+                    continue
+                vals = sorted(set(v for v in bot.prices(text) if 0 < v < 10000000))
+                if vals:
+                    print(f'Amazon exact ASIN arama fiyatı: {vals[:12]}')
+                    return vals[0], next((v for v in vals if v > vals[0] * 1.03), None)
+        except Exception:
+            pass
+    return None, None
+
+
+def _amazon_search_prices(url, title):
+    m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
+    asin = m.group(1) if m else None
+    queries = []
+    if asin:
+        queries += [f'site:amazon.com.tr {asin} TL', f'"{asin}" Amazon Türkiye fiyat']
+    if title and asin:
+        queries.append(f'site:amazon.com.tr "{title[:100]}" {asin}')
+    for qtext in queries:
+        cur, prev = _search_exact_amazon_price(qtext, asin)
+        if cur is not None:
+            return cur, prev
+    return None, None
+
+
 def _search_prices(query, domain=None):
     engines = [
         f'https://www.google.com/search?q={quote(query)}&num=10&filter=0',
@@ -117,25 +162,8 @@ def _search_prices(query, domain=None):
     return []
 
 
-def _amazon_search_prices(url, title):
-    m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
-    asin = m.group(1) if m else None
-    queries = []
-    if asin:
-        queries += [f'site:amazon.com.tr {asin} TL', f'"{asin}" Amazon Türkiye fiyat']
-    if title:
-        queries.append(f'site:amazon.com.tr "{title[:100]}" TL')
-    for qtext in queries:
-        found = _search_prices(qtext, 'amazon.com.tr')
-        if found:
-            # Arama sonuçlarında en düşük fiyat current olabilir; bir üst anlamlı fiyatı referans olarak tut.
-            print(f'Amazon arama son çare fiyatları: {found[:12]}')
-            return found[0], next((v for v in found if v > found[0] * 1.03), None)
-    return None, None
-
-
 def _akakce_market_reference(url, title, current):
-    """Akakçe yalnızca piyasa/önceki fiyat referansıdır; Amazon güncel fiyatı yerine kullanılmaz."""
+    """Akakçe yalnızca piyasa/geçmiş fiyat referansıdır; Amazon güncel fiyatı yerine kullanılmaz."""
     m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
     queries = []
     if m:
@@ -191,9 +219,10 @@ def product_page(site, url, title, browser, search_ps=None):
                 print(f'{site} sayfa referansı: {prev or 0:.2f}')
                 return {'name': _clean_name(name), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
 
-        print(f'{site} DOM/HTML fiyatı bulunamadı; Amazon arama + Akakçe referansı deneniyor | {url}')
+        print(f'{site} DOM/HTML fiyatı bulunamadı; exact ASIN araması deneniyor | {url}')
         cur, prev = _amazon_search_prices(url, title)
         if cur:
+            # Akakçe yalnızca piyasa/geçmiş referansıdır; Amazon current price olarak asla kullanılmaz.
             ak_prev = _akakce_market_reference(url, title, cur)
             if ak_prev and (prev is None or ak_prev > prev):
                 prev = ak_prev
