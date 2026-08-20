@@ -1,11 +1,13 @@
 name: Bahadir Indirim Botu
 
+# Marketplace katmanı da runner açıkken kendi içinde 10 dakikalık döngüyle çalışır.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "30 */5 * * *"
 
-# Marketplace taraması Telegram'ın hızlı 5 dakikalık taramasını bloklamaz.
 concurrency:
   group: bahadir-marketplace-scanner
   cancel-in-progress: false
@@ -13,14 +15,14 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 350
     permissions:
       contents: read
       actions: read
     steps:
       - name: Otomatik çalışma kontrolü
         run: |
-          echo "Marketplace bot çalışma zamanı: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Marketplace sürekli tarama başlıyor: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "Tetikleyici: ${{ github.event_name }}"
           echo "Ref: ${{ github.ref }}"
 
@@ -62,16 +64,29 @@ jobs:
           r.raise_for_status()
           PY
 
-      - name: Marketplace taraması
-        timeout-minutes: 10
+      - name: Marketplace 10 dakikalık sürekli tarama
+        timeout-minutes: 330
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
-          python apply_priority_runtime_patch.py
-          python apply_marketplace_runtime_patch.py
-          python apply_scanner_runtime_patch.py
-          python apply_speed_runtime_patch.py
-          python marketplace_scanner.py
+          set -u
+          end=$((SECONDS + 31500))
+          cycle=0
+          while [ "$SECONDS" -lt "$end" ]; do
+            cycle=$((cycle + 1))
+            echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            python apply_priority_runtime_patch.py
+            python apply_marketplace_runtime_patch.py
+            python apply_scanner_runtime_patch.py
+            python apply_speed_runtime_patch.py
+            timeout 540s python marketplace_scanner.py || echo "Marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
+            remaining=$((end - SECONDS))
+            if [ "$remaining" -le 0 ]; then break; fi
+            sleep_for=600
+            if [ "$remaining" -lt "$sleep_for" ]; then sleep_for="$remaining"; fi
+            echo "Sonraki marketplace taraması ${sleep_for} saniye sonra."
+            sleep "$sleep_for"
+          done
