@@ -50,10 +50,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python run_bot.py
-      - name: Hepsiburada + Trendyol keşfi V2
+      - name: Hepsiburada + Trendyol keşfi V3
         timeout-minutes: 8
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python marketplaces_v2.py
+        run: python marketplaces_v3.py
