@@ -20,29 +20,37 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
     disc=(p-c)/p*100 if p and p>c else None
     if disc is not None and disc<MIN_DISCOUNT: print(f'ATLANDI | {source}:{post_id} | %{disc:.1f} < %{MIN_DISCOUNT}'); remember(key); return False
     if disc is None and not coupon and not DEAL_WORDS.search(signal or ''): print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok'); remember(key); return False
+    # Kaynak mesajındaki fiyatın birkaç dakika içinde değişmesini engellemek için ürünü tekrar aç.
+    try:
+        live_current, live_old = marketplace_price_check(s,u,c)
+        if live_current is None:
+            print(f'ATLANDI | {source}:{post_id} | canlı fiyat okunamadı'); return False
+        drift=abs(live_current-c)/max(c,1)
+        if drift>0.05:
+            print(f'ATLANDI | {source}:{post_id} | fiyat değişti | kaynak={c:.2f} | canlı={live_current:.2f} | fark=%{drift*100:.1f}'); remember(key); return False
+        c=live_current
+    except Exception as e:
+        print('CANLI FİYAT KONTROL HATA',e); return False
     market_ref=None
     if s=='Amazon':
         try:
             q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split()); words=q.split()
-            # Uzun başlıkları kademeli kısaltarak Akakçe'de gerçek piyasa fiyatını ara.
             queries=[' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]; best=[]
             for qq in queries:
                 if not qq: continue
                 r=requests.get('https://www.akakce.com/arama/?q='+requests.utils.quote(qq),headers=HEAD,timeout=7)
                 if not r.ok: continue
                 soup=BeautifulSoup(r.text,'html.parser'); vals=[]
-                for el in soup.select('.pt_v8,.price,.fiyat,[class*="price"]'):
+                for el in soup.select('.pt_v8 .price,.p-item .price,.m_i .price,.product .price,.fiyat'):
                     x=money(el.get_text(' ',strip=True))
                     if x and x>1: vals.append(x)
                 if vals: best.append(min(vals))
             if best:
                 market_ref=min(best)
                 market_disc=(market_ref-c)/market_ref*100 if market_ref>c else 0
-                # Kaynağın "önceki" fiyatı piyasa fiyatından kopuksa onu indirim hesabında kullanma.
                 if market_disc < MIN_DISCOUNT:
                     print(f'ATLANDI | {source}:{post_id} | piyasa indirimi yetersiz | mevcut={c:.2f} | Akakçe={market_ref:.2f} | %{market_disc:.1f}')
                     remember(key); return False
-                # Güvenilir piyasa referansı varsa sahte/list fiyatını tamamen bırak.
                 p=market_ref; disc=market_disc
                 print(f'AKAKÇE REFERANS | mevcut={c:.2f} | piyasa={market_ref:.2f} | gerçek indirim=%{disc:.1f}')
         except Exception as e: print('AKAKCE KONTROL HATA',e)
@@ -78,4 +86,4 @@ new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
 '''
 s,n=re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()',lambda m:new_send.rstrip()+'\n',s,count=1,flags=re.S)
 if n!=1:raise SystemExit('send bulunamadı')
-P.write_text(s,encoding='utf-8'); print('Telegram patch: piyasa fiyatı doğrulaması + gerçek görsel yükleme')
+P.write_text(s,encoding='utf-8'); print('Telegram patch: canlı fiyat drift kontrolü + sıkı Akakçe + gerçek görsel yükleme')
