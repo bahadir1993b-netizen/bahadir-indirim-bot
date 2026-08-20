@@ -26,6 +26,15 @@ jobs:
           python-version: "3.12"
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
+      - name: ⚡ Önce Telegram kanallarını tara
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          set -u
+          echo "=== ÖNCELİK: Telegram kaynakları, tarayıcı/OCR kurulumundan ÖNCE ==="
+          timeout 120s python telegram_fast_sources.py || echo "Hızlı Telegram taraması bu turda hata verdi; tam tarama devam edecek."
       - name: Chromium kur
         run: python -m playwright install --with-deps chromium
       - name: OCR motoru kur
