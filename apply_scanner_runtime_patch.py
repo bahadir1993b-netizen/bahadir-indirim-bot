@@ -75,9 +75,10 @@ s = s.replace("AMAZON_TAG = os.getenv('AMAZON_ASSOCIATE_TAG', '').strip()", "AMA
 
 if "def _verify_with_initial_reference" not in s:
     wrapper = r'''
+_ORIGINAL_VERIFY = verify
 
 def _verify_with_initial_reference(page, site, url, fallback_title, expected_current):
-    result = verify(page, site, url, fallback_title, expected_current)
+    result = _ORIGINAL_VERIFY(page, site, url, fallback_title, expected_current)
     if result: return result
     ref_previous = _CANDIDATE_PREVIOUS.get(url)
     if not ref_previous or ref_previous <= expected_current: return None
