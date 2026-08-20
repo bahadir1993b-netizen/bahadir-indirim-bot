@@ -4,17 +4,17 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    # Every 5 minutes, offset from the exact hour to reduce GitHub scheduler congestion.
-    - cron: "2-59/5 * * * *"
+    # Bağımsız tarama, hızlı Telegram kaynak işinin arkasından çalışsın.
+    - cron: "2-59/10 * * * *"
 
 concurrency:
-  group: bahadir-indirim-bot
+  group: bahadir-indirim-scanner
   cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Otomatik çalışma kontrolü
         run: |
@@ -53,28 +53,10 @@ jobs:
           print(f"Supabase cevap: {r.text[:500]}")
           r.raise_for_status()
           PY
-      - name: Telegram çıktı düzeltmeleri
-        run: python apply_telegram_runtime_patch.py
       - name: Marketplace fiyat doğrulama düzeltmesi
         run: python apply_marketplace_runtime_patch.py
       - name: Scanner çıktı düzeltmeleri
         run: python apply_scanner_runtime_patch.py
-      - name: Telegram fırsat keşfi (Amazon + Hepsiburada + Trendyol)
-        timeout-minutes: 8
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
-        run: python telegram_sources.py
-      - name: Güncel kupon ve kod monitörü
-        timeout-minutes: 3
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
-        run: python coupon_monitor.py
       - name: Bağımsız internet fiyat taraması
         timeout-minutes: 8
         env:
