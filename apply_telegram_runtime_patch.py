@@ -1,76 +1,72 @@
 from pathlib import Path
 import re
-
-P = Path('telegram_sources.py')
-s = P.read_text(encoding='utf-8')
-
-new_extract = r'''def extract_title(raw):
-    text = re.sub(r'(?i)\s*👉?\s*FIRSATA\s*G[İI]T.*$', '', raw or '')
-    text = re.sub(r'(?i)\s*(?:GOOGLE\s*🔍?|#\w+|@\w+)\b', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip(' -•👉')
-    text = re.split(r'\s*(?:🏷️|💰|\b\d[\d.,]*\s*(?:TL|₺))\b', text, maxsplit=1, flags=re.I)[0]
-    return re.sub(r'\s+', ' ', text).strip(' -•👉')[:180]
+P=Path('telegram_sources.py'); s=P.read_text(encoding='utf-8')
+new_extract=r'''def extract_title(raw):
+    text=re.sub(r'(?i)\s*👉?\s*FIRSATA\s*G[İI]T.*$','',raw or '')
+    text=re.sub(r'(?i)\s*(?:GOOGLE\s*🔍?|#\w+|@\w+)\b',' ',text)
+    text=re.sub(r'\s+',' ',text).strip(' -•👉')
+    text=re.split(r'\s*(?:🏷️|💰|\b\d[\d.,]*\s*(?:TL|₺))\b',text,maxsplit=1,flags=re.I)[0]
+    return re.sub(r'\s+',' ',text).strip(' -•👉')[:180]
 '''
-
-s2,n1=re.subn(r'def extract_title\(raw\):.*?(?=\ndef process\()',lambda m:new_extract.rstrip()+'\n',s,count=1,flags=re.S)
-if n1!=1:raise SystemExit('extract_title bulunamadı')
-
+s,n=re.subn(r'def extract_title\(raw\):.*?(?=\ndef process\()',lambda m:new_extract.rstrip()+'\n',s,count=1,flags=re.S)
+if n!=1:raise SystemExit('extract_title bulunamadı')
 new_send=r'''def send(s,u,t,c,p,source,post_id,signal,coupon=None):
-    if not valid(s,u):print(f'ATLANDI | {source}:{post_id} | geçersiz link');return False
+    if not valid(s,u): print(f'ATLANDI | {source}:{post_id} | geçersiz link'); return False
     key=f'{source}:{post_id}'
-    if seen(key):return False
+    if seen(key): return False
     title=extract_title(t)
     if re.search(r'\b(kitap|kitapları|roman|dergi|magazin|e-kitap|ebook|yayınevi|yayıncılık)\b',title,re.I):
         print(f'ATLANDI | {source}:{post_id} | kitap kategorisi'); remember(key); return False
     disc=(p-c)/p*100 if p and p>c else None
-    if disc is not None and disc<MIN_DISCOUNT:print(f'ATLANDI | {source}:{post_id} | %{disc:.1f} < %{MIN_DISCOUNT}');remember(key);return False
-    if disc is None and not coupon and not DEAL_WORDS.search(signal or ''):print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok');remember(key);return False
-
-    # Amazon'da kaynak sayfanın verdiği fiyatı gerçek piyasa ile karşılaştır.
-    # Akakçe daha ucuz bir alternatif gösteriyorsa sadece Amazon liste/strike fiyatına bakıp paylaşma.
+    if disc is not None and disc<MIN_DISCOUNT: print(f'ATLANDI | {source}:{post_id} | %{disc:.1f} < %{MIN_DISCOUNT}'); remember(key); return False
+    if disc is None and not coupon and not DEAL_WORDS.search(signal or ''): print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok'); remember(key); return False
     if s=='Amazon':
         try:
-            q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split())[:180]
-            r=requests.get('https://www.akakce.com/arama/?q='+requests.utils.quote(q),headers=HEAD,timeout=6)
-            if r.ok:
+            q=' '.join(re.sub(r'Amazon\.com\.tr.*$','',title,flags=re.I).split())
+            # Uzun Amazon başlıklarını kademeli kısalt; önce marka/model + ilk anlamlı kelimelerle ara.
+            words=q.split(); queries=[' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]
+            best=[]
+            for qq in queries:
+                if not qq: continue
+                r=requests.get('https://www.akakce.com/arama/?q='+requests.utils.quote(qq),headers=HEAD,timeout=6)
+                if not r.ok: continue
                 soup=BeautifulSoup(r.text,'html.parser'); vals=[]
                 for el in soup.select('.pt_v8,.price,.fiyat,[class*="price"]'):
                     x=money(el.get_text(' ',strip=True))
                     if x and x>1: vals.append(x)
-                if vals and min(vals)<c*0.85:
-                    print(f'ATLANDI | {source}:{post_id} | Akakçe daha ucuz | Amazon={c:.2f} | Akakçe={min(vals):.2f}')
-                    remember(key); return False
+                if vals: best.append(min(vals))
+                if best and min(best)<c*0.85: break
+            if best and min(best)<c*0.85:
+                print(f'ATLANDI | {source}:{post_id} | Akakçe daha ucuz | Amazon={c:.2f} | Akakçe={min(best):.2f}')
+                remember(key); return False
         except Exception as e: print('AKAKCE KONTROL HATA',e)
-
     row=save(s,u,t,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None
     if last:
         try:
-            if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):print(f'ATLANDI | {source}:{post_id} | cooldown');remember(key);return False
-        except:pass
+            if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN): print(f'ATLANDI | {source}:{post_id} | cooldown'); remember(key); return False
+        except: pass
     lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else ('🎟️ KUPONLU FIRSAT' if coupon else '🔥 FIRSAT'),' ',f'🛍️ {title}',f'💰 {c:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.')]
-    if p and p>c:lines.append(f'🏷️ Önceki: {p:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.'))
-    if coupon:lines.append(f'🎟️ Kupon: {coupon}')
-    lines+=['','👇 Fırsata git']; caption='\n'.join(lines)
-    image=None
+    if p and p>c: lines.append(f'🏷️ Önceki: {p:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.'))
+    if coupon: lines.append(f'🎟️ Kupon: {coupon}')
+    lines+=['','👇 Fırsata git']; caption='\n'.join(lines); image=None
     try:
         r=requests.get(u,headers=HEAD,timeout=6)
         if r.ok:
             soup=BeautifulSoup(r.text,'html.parser')
-            for sel,attr in [('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('meta[property="twitter:image"]','content')]:
+            for sel in ['meta[property="og:image"]','meta[name="twitter:image"]','meta[property="twitter:image"]']:
                 el=soup.select_one(sel)
-                if el and el.get(attr):image=clean(el.get(attr));break
-    except:pass
+                if el and el.get('content'): image=clean(el.get('content')); break
+    except: pass
     markup={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
     if image:
         resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',json={'chat_id':CHAT,'photo':image,'caption':caption[:1024],'reply_markup':markup},timeout=15)
-        if not resp.ok:resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
-    else:resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
+        if not resp.ok: resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
+    else: resp=requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':caption,'disable_web_page_preview':False,'reply_markup':markup},timeout=15)
     resp.raise_for_status()
-    if isinstance(row,dict) and row.get('id'):sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
-    remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL'+(f' | %{disc:.1f}' if disc is not None else ''));return True
+    if isinstance(row,dict) and row.get('id'): sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
+    remember(key); print(f'GÖNDERİLDİ | {s} | {c:.2f} TL'+(f' | %{disc:.1f}' if disc is not None else '')); return True
 '''
-
-s3,n2=re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()',lambda m:new_send.rstrip()+'\n',s2,count=1,flags=re.S)
-if n2!=1:raise SystemExit('send bulunamadı')
-P.write_text(s3,encoding='utf-8')
-print('Telegram patch: kitaplar hariç + Amazon Akakçe piyasa kontrolü + temiz başlık/görsel')
+s,n=re.subn(r'def send\(s,u,t,c,p,source,post_id,signal,coupon=None\):.*?(?=\ndef extract_title\()',lambda m:new_send.rstrip()+'\n',s,count=1,flags=re.S)
+if n!=1:raise SystemExit('send bulunamadı')
+P.write_text(s,encoding='utf-8')
+print('Telegram patch güncellendi: kademeli Akakçe araması + fotoğraf + temiz başlık')
