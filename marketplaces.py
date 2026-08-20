@@ -1,4 +1,4 @@
-import os,re,json,requests
+import os,re,json,requests,html as htmlmod
 from datetime import datetime,timezone,timedelta
 from urllib.parse import urlparse,parse_qs,unquote,urljoin,quote
 from bs4 import BeautifulSoup
@@ -17,7 +17,7 @@ TERMS=['indirim','kampanya','fırsat','elektronik','telefon','laptop','kulaklık
 def sb(method,path,**kwargs):
     h={'apikey':SUPABASE_KEY,'Authorization':f'Bearer {SUPABASE_KEY}','Content-Type':'application/json','Accept':'application/json'}
     if method.upper()=='POST':h['Prefer']='return=representation'
-    r=requests.request(method,f'{SUPABASE_URL}/rest/v1/{path}',headers=h,timeout=12,**kwargs); r.raise_for_status()
+    r=requests.request(method,f'{SUPABASE_URL}/rest/v1/{path}',headers=h,timeout=12,**kwargs);r.raise_for_status()
     return r.json() if r.text else []
 
 
@@ -44,7 +44,7 @@ def prices(text):
 
 
 def unwrap(u):
-    u=unquote(str(u or '')).replace('\\/','/').replace('\\u002F','/')
+    u=htmlmod.unescape(unquote(str(u or ''))).replace('\\/','/').replace('\\u002F','/')
     for _ in range(6):
         q=parse_qs(urlparse(u).query);nxt=None
         for k in ('q','url','u','uddg','target'):
@@ -56,10 +56,11 @@ def unwrap(u):
 
 def product_url(site,href):
     u=unwrap(href)
+    if u.startswith('//'):u='https:'+u
     if not u.startswith(('http://','https://')):return None
     p=urlparse(u);domain=SITES[site]
     if domain not in p.netloc.lower():return None
-    if not re.search(r'-p-[a-z0-9]+(?:/|$)',p.path,re.I):return None
+    if not re.search(r'-p-[a-z0-9]+(?:[/?#]|$)',p.path,re.I):return None
     return f'https://{p.netloc.lower()}{p.path.rstrip("/")}'
 
 
@@ -72,13 +73,16 @@ def add_candidate(site,href,title,text,out,seen):
 
 
 def raw_product_urls(site,html):
-    domain=SITES[site]
-    pat=rf'https?://(?:www\.)?{re.escape(domain)}/[^"\'<>\\\s]+-p-[A-Za-z0-9]+'
-    return re.findall(pat,html,re.I)
+    s=htmlmod.unescape(html or '').replace('\\/','/').replace('\\u002F','/')
+    domain=re.escape(SITES[site])
+    pat=rf'https?://(?:www\.)?{domain}/[^"\'<>\s]+-p-[A-Za-z0-9]+'
+    return re.findall(pat,s,re.I)
 
 
 def search_engine(site,term,engine):
-    domain=SITES[site];q=requests.utils.quote(f'site:{domain} {term} TL')
+    domain=SITES[site]
+    # inurl:-p- is intentional: category/search pages are useless to us; we need product pages.
+    q=quote(f'site:{domain} inurl:-p- {term} TL')
     if engine=='google':url=f'https://www.google.com/search?q={q}&num=20&filter=0'
     elif engine=='bing':url=f'https://www.bing.com/search?q={q}&count=20'
     elif engine=='yahoo':url=f'https://search.yahoo.com/search?p={q}'
@@ -88,76 +92,36 @@ def search_engine(site,term,engine):
         r=requests.get(url,headers=HEADERS,timeout=15,allow_redirects=True)
         print(f'{site} {engine} [{term}] HTTP: {r.status_code}')
         if r.status_code>=400:return out
-        soup=BeautifulSoup(r.text,'html.parser')
+        raw=htmlmod.unescape(r.text).replace('\\/','/').replace('\\u002F','/')
+        soup=BeautifulSoup(raw,'html.parser')
         blocks=soup.select('div.MjjYud, li.b_algo, .result, .results_links, .web-result, div.dd.searchCenterMiddle')
         for block in blocks:
             text=re.sub(r'\s+',' ',block.get_text(' ',strip=True))
             for a in block.find_all('a',href=True):
                 add_candidate(site,a.get('href'),a.get_text(' ',strip=True),text,out,seen)
                 if len(out)>=MAX_PRODUCTS:return out
+        # Google/Bing sometimes put destination links outside the normal result block.
         for a in soup.find_all('a',href=True):
-            parent=a.parent;text=re.sub(r'\s+',' ',parent.get_text(' ',strip=True)) if parent else ''
+            parent=a.parent
+            text=re.sub(r'\s+',' ',parent.get_text(' ',strip=True)) if parent else ''
             if not re.search(r'(?:TL|₺)',text,re.I) and parent and parent.parent:text=re.sub(r'\s+',' ',parent.parent.get_text(' ',strip=True))
             add_candidate(site,a.get('href'),a.get_text(' ',strip=True),text,out,seen)
             if len(out)>=MAX_PRODUCTS:return out
-        # Some search engines embed destination URLs in JSON/JS instead of href attributes.
-        for raw in raw_product_urls(site,r.text):
-            add_candidate(site,raw,'Ürün',r.text,out,seen)
+        for raw_url in raw_product_urls(site,raw):
+            add_candidate(site,raw_url,'Ürün',raw,out,seen)
             if len(out)>=MAX_PRODUCTS:return out
     except Exception as e:print(f'{site} {engine} hata: {type(e).__name__}: {e}')
     return out
 
 
-def trendyol_public_search(term):
-    base='https://public.trendyol.com/discovery-web-searchgw-service/v2/api/infinite-scroll/sr'
-    params={'q':term,'os':1,'sk':1,'pi':1,'culture':'tr-TR','userGenderId':1,'pId':0,'scoringAlgorithmId':2,'categoryRelevancyEnabled':'false','isLegalRequirementConfirmed':'false','searchStrategyType':'DEFAULT','productStampType':'TypeA','fixSlotProductAdsIncluded':'true'}
-    try:
-        r=requests.get(base,params=params,headers=HEADERS,timeout=15)
-        print(f'Trendyol public API [{term}] HTTP: {r.status_code}')
-        if r.status_code>=400:return []
-        data=r.json().get('result') or {};products=data.get('products') or []
-        out=[];seen=set()
-        for p in products:
-            if not isinstance(p,dict):continue
-            pid=p.get('id') or p.get('productId')
-            raw=p.get('url') or p.get('link') or p.get('productUrl')
-            if raw and raw.startswith('/'):raw='https://www.trendyol.com'+raw
-            if not raw and pid:raw=f'https://www.trendyol.com/p-{pid}'
-            u=product_url('Trendyol',raw or '')
-            if not u or u in seen:continue
-            # The public API commonly exposes discountedPrice / sellingPrice in nested price objects.
-            candidates=[]
-            def walk(x):
-                if isinstance(x,dict):
-                    for k,v in x.items():
-                        if k.lower() in ('discountedprice','sellingprice','saleprice','price','finalprice','currentprice') and isinstance(v,(int,float,str)):
-                            z=price(v)
-                            if z is not None:candidates.append(z)
-                        else:walk(v)
-                elif isinstance(x,list):
-                    for y in x:walk(y)
-            walk(p)
-            title=p.get('name') or p.get('title') or 'Ürün'
-            seen.add(u);out.append((u,title,sorted(set(candidates))))
-            print(f'Trendyol API aday: {title[:80]} | fiyatlar={sorted(set(candidates))[:5]} | {u}')
-            if len(out)>=MAX_PRODUCTS:return out
-        return out
-    except Exception as e:
-        print(f'Trendyol public API hata: {type(e).__name__}: {e}');return []
-
-
 def discover(site):
     found=[];seen=set()
-    if site=='Trendyol':
-        for term in TERMS:
-            for item in trendyol_public_search(term):
-                if item[0] not in seen:seen.add(item[0]);found.append(item)
-                if len(found)>=MAX_PRODUCTS:return found
     for term in TERMS:
         for engine in ('google','bing','yahoo','ddg'):
             for item in search_engine(site,term,engine):
                 if item[0] not in seen:seen.add(item[0]);found.append(item)
                 if len(found)>=MAX_PRODUCTS:return found
+        print(f'{site} [{term}] toplam aday: {len(found)}')
     return found
 
 
@@ -188,18 +152,22 @@ def product_page(site,url,title,browser):
         if not r or status>=400:return None
         page.wait_for_timeout(1200);html=page.content();text=page.locator('body').inner_text(timeout=5000)
         name,jd=jsonld_prices(html);vals=list(jd)
-        selectors=['[data-test-id*="price"]','[data-test*="price"]','[class*="price"]','meta[property="product:price:amount"]','meta[itemprop="price"]']
+        # Marketplace-specific current-price selectors first; broad selectors are only fallback.
+        selectors=['meta[property="product:price:amount"]','meta[itemprop="price"]','[data-test-id="price-current"]','[data-test-id="current-price"]','[data-test="currentPrice"]','[class*="currentPrice"]','[class*="sellingPrice"]','[class*="discountedPrice"]','[class*="price"]']
         for sel in selectors:
             try:
-                loc=page.locator(sel);n=min(loc.count(),30)
+                loc=page.locator(sel);n=min(loc.count(),25)
                 for i in range(n):
                     raw=loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=300)
-                    vals.extend(prices(raw) if re.search(r'(?:TL|₺)',str(raw),re.I) else ([price(raw)] if price(raw) is not None else []))
+                    if re.search(r'(?:TL|₺)',str(raw),re.I):vals.extend(prices(raw))
+                    else:
+                        v=price(raw)
+                        if v is not None:vals.append(v)
             except:pass
         vals.extend(prices(text));vals=sorted(set(v for v in vals if v is not None))
         if not vals:return None
         current=None
-        for sel in ['[data-test-id="price-current"]','[data-test-id="current-price"]','[data-test="currentPrice"]']:
+        for sel in ['[data-test-id="price-current"]','[data-test-id="current-price"]','[data-test="currentPrice"]','[class*="currentPrice"]','[class*="discountedPrice"]','[class*="sellingPrice"]']:
             try:
                 loc=page.locator(sel)
                 if loc.count():
@@ -208,7 +176,8 @@ def product_page(site,url,title,browser):
             except:pass
         if current is None and jd:current=jd[0]
         if current is None:current=vals[0]
-        previous=next((v for v in vals if v>current*1.03),None);name=name or title or 'Ürün'
+        previous=next((v for v in vals if v>current*1.03),None)
+        name=name or title or 'Ürün'
         try:name=page.locator('meta[property="og:title"]').get_attribute('content') or name
         except:pass
         print(f'{site} güvenilir fiyatlar: current={current:.2f} previous={previous or 0:.2f} tüm={vals[:10]}')
