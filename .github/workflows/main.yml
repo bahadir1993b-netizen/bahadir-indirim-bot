@@ -5,23 +5,22 @@ on:
   schedule:
     - cron: "*/10 * * * *"
 
-# Her 10 dakikada bir temiz tarama. Tarama kısa sürdüğü için aynı runner
-# üzerinde dakikalarca bekleyen eski iç döngü kullanılmıyor.
+# Marketplace taraması Telegram'ın hızlı 5 dakikalık taramasını bloklamaz.
 concurrency:
-  group: bahadir-indirim-scanner
+  group: bahadir-marketplace-scanner
   cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
     steps:
       - name: Otomatik çalışma kontrolü
         run: |
-          echo "Bot çalışma zamanı: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Marketplace bot çalışma zamanı: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "Tetikleyici: ${{ github.event_name }}"
           echo "Ref: ${{ github.ref }}"
 
@@ -63,8 +62,8 @@ jobs:
           r.raise_for_status()
           PY
 
-      - name: Telegram ve marketplace taraması
-        timeout-minutes: 15
+      - name: Marketplace taraması
+        timeout-minutes: 10
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -72,9 +71,6 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
           python apply_priority_runtime_patch.py
-          python apply_telegram_runtime_patch.py
-          sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
-          python telegram_sources.py || true
           python apply_marketplace_runtime_patch.py
           python apply_scanner_runtime_patch.py
           python apply_speed_runtime_patch.py
