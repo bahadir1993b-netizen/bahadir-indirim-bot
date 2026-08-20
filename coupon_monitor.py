@@ -6,7 +6,9 @@ TOKEN=os.environ['TELEGRAM_BOT_TOKEN']
 SUPABASE_URL=os.environ['SUPABASE_URL'].rstrip('/')
 SUPABASE_KEY=os.environ['SUPABASE_SERVICE_KEY']
 CHANNEL_ID='-1004424116637'
-MAX_AGE_MINUTES=45
+# Workflow 5 dakikada bir çalışıyor. Eski kuponları değil, yalnızca gerçekten yeni gelenleri yakala.
+# 15 dk tolerans: GitHub Actions gecikirse bile kaçırmamak için 3 çalışma aralığı.
+MAX_AGE_MINUTES=15
 SOURCES={'OnuAl':'onual_firsat','Enes ÖZEN':'enesozen','İndirim Bakanlığı':'indirimbakanligi','Cihaz.TV':'cihaztv'}
 SITES=('Amazon','Hepsiburada','Trendyol')
 COMMON={'INDIRIM','KAMPANYA','FIRSAT','KODU','KOD','KUPON','PROMOSYON','AMAZON','HEPSIBURADA','TRENDYOL','TL','TRY','MOBIL','UYGULAMADA','SEPETTE'}
