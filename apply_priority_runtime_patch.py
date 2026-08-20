@@ -10,7 +10,8 @@ s, n = re.subn(r"SOURCES=\{.*?\}", new_sources, s, count=1, flags=re.S)
 if n != 1:
     raise SystemExit('SOURCES bulunamadı')
 
-s = re.sub(r"MIN_DISCOUNT=6\.0", "MIN_DISCOUNT=5.0", s, count=1)
+# Test aşamasında düşük eşik: %2 ve üzeri fırsatlar gönderilebilir.
+s = re.sub(r"MIN_DISCOUNT=6\.0", "MIN_DISCOUNT=2.0", s, count=1)
 s = s.replace("MAX_AGE=30", "MAX_AGE=30\nSOURCE_PRIORITY=True\nSOURCE_LIMIT=12")
 
 if '_PriorityExecutor' not in s:
@@ -25,8 +26,6 @@ s, n = re.subn(r"def marketplace_price_check\(s,u,expected\):.*?(?=\ndef coupon_
 if n != 1:
     raise SystemExit('marketplace_price_check bulunamadı')
 
-# Kupon kodu filtresi: 4 harfli genel kelimeleri (örn. UYLA) kupon olarak kabul etme.
-# Gerçek kodlar açık KOD/KUPON etiketiyle ve en az 5 karakterle gelmeli.
 coupon_patch = r'''\ndef coupon_code(text):\n    pats=[\n        r'\\b(?:KOD|KODU|KUPON|KUPON KODU|PROMOSYON(?: KODU)?)\\s*[:=\\-]?\\s*([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\\b',\n        r'\\b([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\\s+(?:KOD(?:U)?|KUPON(?:U)?)\\b'\n    ]\n    bad={'INDIRIM','KAMPANYA','FIRSAT','AMAZON','HEPSIBURADA','TRENDYOL','UYLA','KOD','KUPON','PROMO'}\n    for pat in pats:\n        for m in re.finditer(pat,text or '',re.I):\n            code=m.group(1).upper()\n            if code in bad or code.isdigit() or not re.search(r'[A-ZÇĞİÖŞÜ]',code):\n                continue\n            return code\n    return None\n'''
 s, n = re.subn(r"\ndef coupon_code\(text\):.*?(?=\ndef seen\()", coupon_patch, s, count=1, flags=re.S)
 if n != 1:
@@ -36,4 +35,4 @@ if "for b in blocks[:SOURCE_LIMIT]:" not in s:
     s = s.replace("for b in blocks:", "for b in blocks[:SOURCE_LIMIT]:")
 
 P.write_text(s, encoding='utf-8')
-print('Priority patch OK | kaynak önceliği | sıralı gönderim | canlı fiyat fallback | %5 eşik | sahte kupon filtresi')
+print('Priority patch OK | kaynak önceliği | sıralı gönderim | canlı fiyat fallback | %2 eşik | sahte kupon filtresi')
