@@ -17,118 +17,165 @@ function doGet(e) {
     const term = String((e.parameter && e.parameter.q) || '').trim();
     if (!SITES[site] || !term) return json({ok:false,error:'site ve q gerekli'});
 
-    // Önce doğrudan marketplace denenir. 403/boş sonuçta Bing devreye girer.
     const direct = directSearch(site, term);
     if (direct.products.length) {
       return json({ok:true,site:site,q:term,source:'marketplace',http_status:direct.status,products:direct.products.slice(0,20)});
     }
 
-    const bing = bingSearch(site, term);
-    return json({
-      ok:true,
-      site:site,
-      q:term,
-      source:'bing',
-      http_status:direct.status,
-      products:bing.slice(0,20)
-    });
+    // Marketplace GitHub/Apps Script IP'sini engelliyorsa arama motorlarından
+    // yalnızca ürün URL'si keşfedilir. Fiyat kesinlikle arama motorundan alınmaz.
+    let products = bingHtmlSearch(site, term);
+    let source = 'bing-html';
+    if (!products.length) {
+      products = bingRssSearch(site, term);
+      source = 'bing-rss';
+    }
+    if (!products.length) {
+      products = googleSearch(site, term);
+      source = 'google';
+    }
+
+    return json({ok:true,site:site,q:term,source:source,http_status:direct.status,products:products.slice(0,20)});
   } catch (err) {
     return json({ok:false,error:String(err)});
   }
 }
 
+function request(url) {
+  return UrlFetchApp.fetch(url, {
+    muteHttpExceptions:true,
+    followRedirects:true,
+    headers:{
+      'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
+      'Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8',
+      'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    }
+  });
+}
+
 function directSearch(site, term) {
   const cfg = SITES[site];
   try {
-    const res = UrlFetchApp.fetch(cfg.search + encodeURIComponent(term), {
-      muteHttpExceptions:true,
-      followRedirects:true,
-      headers:{
-        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
-        'Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'
-      }
-    });
+    const res = request(cfg.search + encodeURIComponent(term));
     const status = res.getResponseCode();
-    const products = extractProducts(site, res.getContentText());
-    return {status:status,products:products};
+    return {status:status,products:extractProducts(site,res.getContentText())};
   } catch (_) {
     return {status:0,products:[]};
   }
 }
 
-function bingSearch(site, term) {
+function bingHtmlSearch(site, term) {
   const cfg = SITES[site];
   const query = 'site:' + cfg.host + ' ' + term;
-  const url = 'https://www.bing.com/search?format=rss&count=50&q=' + encodeURIComponent(query);
   const out = [];
   const seen = {};
-
   try {
-    const res = UrlFetchApp.fetch(url, {
-      muteHttpExceptions:true,
-      followRedirects:true,
-      headers:{
-        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36',
-        'Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'
-      }
-    });
-    const xml = res.getContentText();
-
-    // Bing RSS'teki <link> alanları çoğunlukla doğrudan sonuç URL'sini verir.
-    const links = xml.match(/<link>([\s\S]*?)<\/link>/gi) || [];
-    for (const tag of links) {
-      const raw = decodeXml(tag.replace(/^<link>/i,'').replace(/<\/link>$/i,''));
-      add(site, raw, out, seen);
-    }
-
-    // Bazı Bing cevaplarında URL HTML içinde farklı biçimde gömülü olabilir.
-    if (out.length < 20) {
-      const direct = xml.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"]+', 'ig')) || [];
-      for (const u of direct) add(site, u, out, seen);
-    }
+    const res = request('https://www.bing.com/search?q=' + encodeURIComponent(query) + '&count=30');
+    const html = decodeEntities(res.getContentText());
+    extractSearchLinks(site, html, out, seen);
   } catch (_) {}
-
   return out;
 }
 
-function extractProducts(site, html) {
+function bingRssSearch(site, term) {
   const cfg = SITES[site];
   const out = [];
   const seen = {};
-
-  const re = /href\s*=\s*["']([^"']+)["']/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const raw = decodeEntities(m[1]).replace(/\\\//g,'/');
-    const urls = raw.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s"<>]+', 'ig')) || [];
-    for (const u0 of urls) add(site, u0, out, seen);
-    if (out.length >= 20) break;
-  }
-
-  if (out.length < 20) {
-    const re2 = new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s"<>\\\\]+', 'ig');
-    const matches = html.match(re2) || [];
-    for (const u0 of matches) add(site, u0, out, seen);
-  }
+  try {
+    const res = request('https://www.bing.com/search?format=rss&count=50&q=' + encodeURIComponent('site:' + cfg.host + ' ' + term));
+    const xml = decodeXml(res.getContentText());
+    const links = xml.match(/<link>[\s\S]*?<\/link>/gi) || [];
+    for (const tag of links) {
+      let raw = tag.replace(/^<link>/i,'').replace(/<\/link>$/i,'').trim();
+      raw = decodeXml(raw);
+      addSearchUrl(site, raw, out, seen);
+    }
+    if (out.length < 20) extractSearchLinks(site, xml, out, seen);
+  } catch (_) {}
   return out;
 }
 
-function add(site, raw, out, seen) {
+function googleSearch(site, term) {
   const cfg = SITES[site];
-  let u = decodeEntities(raw)
+  const out = [];
+  const seen = {};
+  try {
+    const q = 'site:' + cfg.host + ' ' + term;
+    const res = request('https://www.google.com/search?q=' + encodeURIComponent(q) + '&num=30&hl=tr');
+    const html = decodeEntities(res.getContentText());
+    extractSearchLinks(site, html, out, seen);
+  } catch (_) {}
+  return out;
+}
+
+function extractSearchLinks(site, html, out, seen) {
+  const cfg = SITES[site];
+  const hrefs = html.match(/href\s*=\s*["'][^"']+["']/gi) || [];
+  for (const h of hrefs) {
+    const raw = h.replace(/^href\s*=\s*["']/i,'').replace(/["']$/,'');
+    collectUrlCandidates(site, raw, out, seen);
+    if (out.length >= 20) return;
+  }
+
+  // Arama motoru HTML'sinde doğrudan marketplace URL'si gömülü ise onu da yakala.
+  const direct = html.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"\\\\]+', 'ig')) || [];
+  for (const raw of direct) {
+    addSearchUrl(site, raw, out, seen);
+    if (out.length >= 20) return;
+  }
+}
+
+function collectUrlCandidates(site, raw, out, seen) {
+  let u = decodeEntities(raw).replace(/\\\//g,'/');
+  addSearchUrl(site,u,out,seen);
+
+  // Bing/Google sonucu yönlendirme URL'sinin içindeki gerçek URL'yi çıkar.
+  try {
+    const q = u.match(/[?&](?:u|url|q)=([^&]+)/i);
+    if (q) addSearchUrl(site,decodeURIComponent(q[1]),out,seen);
+  } catch (_) {}
+}
+
+function addSearchUrl(site, raw, out, seen) {
+  const cfg = SITES[site];
+  let u = decodeEntities(String(raw || ''))
     .replace(/\\\//g,'/')
     .replace(/["'<>]+$/g,'')
     .trim();
   if (!/^https?:\/\//i.test(u)) return;
 
+  // URL'nin içinde marketplace alan adı geçiyorsa doğrudan olan kısmı ayıkla.
+  const m = u.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(cfg.host) + '\\/[^\\s<>&"\\\\]+', 'i'));
+  if (m) u = m[0];
+
   try {
     const x = new URL(u);
     const host = x.hostname.toLowerCase().replace(/^www\./,'');
+    if (host !== cfg.host || !cfg.re.test(x.pathname)) return;
     const clean = 'https://www.' + cfg.host + x.pathname.replace(/\/$/,'');
-    if (host !== cfg.host || !cfg.re.test(x.pathname) || seen[clean]) return;
+    if (seen[clean]) return;
     seen[clean] = true;
     out.push({url:clean});
   } catch (_) {}
+}
+
+function extractProducts(site, html) {
+  const out = [];
+  const seen = {};
+  const re = /href\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const raw = decodeEntities(m[1]).replace(/\\\//g,'/');
+    const urls = raw.match(new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(SITES[site].host) + '\\/[^\\s"<>]+', 'ig')) || [];
+    for (const u0 of urls) addSearchUrl(site,u0,out,seen);
+    if (out.length >= 20) break;
+  }
+  if (out.length < 20) {
+    const re2 = new RegExp('https?:\\/\\/(?:www\\.)?' + escapeRegex(SITES[site].host) + '\\/[^\\s"<>\\\\]+', 'ig');
+    const matches = html.match(re2) || [];
+    for (const u0 of matches) addSearchUrl(site,u0,out,seen);
+  }
+  return out;
 }
 
 function decodeEntities(s) {
