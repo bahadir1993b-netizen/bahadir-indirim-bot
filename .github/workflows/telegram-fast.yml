@@ -1,0 +1,43 @@
+name: Bahadir Telegram Kaynak Tarama
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Reklam/fırsat kanallarını bağımsız tarayıcıdan önce yakala.
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: bahadir-indirim-telegram-fast
+  cancel-in-progress: true
+
+jobs:
+  telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v5
+      - name: Python kur
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Gereksinimleri kur
+        run: pip install -r requirements.txt
+      - name: Telegram kaynak ve görsel düzeltmeleri
+        run: python apply_telegram_runtime_patch.py
+      - name: Telegram fırsat keşfi
+        timeout-minutes: 4
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+        run: python telegram_sources.py
+      - name: Güncel kupon ve kod monitörü
+        timeout-minutes: 2
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+        run: python coupon_monitor.py
