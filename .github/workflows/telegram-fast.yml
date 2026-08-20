@@ -27,6 +27,8 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: OCR motoru kur
         run: sudo apt-get install -y tesseract-ocr tesseract-ocr-tur
+      - name: Telegram kaynak önceliklerini uygula
+        run: python apply_priority_runtime_patch.py
       - name: Telegram kaynak ve görsel düzeltmeleri
         run: python apply_telegram_runtime_patch.py
       - name: Telegram fırsat keşfi
@@ -35,7 +37,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+          AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: python telegram_sources.py
       - name: Görsel kupon ve kod OCR taraması
         timeout-minutes: 3
@@ -43,5 +45,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+          AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: python telegram_image_ocr_v2.py
