@@ -10,19 +10,15 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - name: Kodu indir
         uses: actions/checkout@v5
-
       - name: Python kur
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
-
       - name: Playwright cache
         uses: actions/cache@v5
         with:
@@ -30,33 +26,34 @@ jobs:
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             playwright-chromium-${{ runner.os }}-
-
       - name: Chromium kur
         timeout-minutes: 4
         run: python -m playwright install chromium
-
       - name: Supabase bağlantı testi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           python - <<'PY'
-          import os
-          import requests
-          url = os.environ["SUPABASE_URL"].rstrip("/")
-          key = os.environ["SUPABASE_SERVICE_KEY"]
-          print(f"Supabase URL: {url}")
-          print(f"Anahtar tipi: {key[:10]}... | uzunluk: {len(key)}")
-          r = requests.get(f"{url}/rest/v1/products?select=id&limit=1", headers={"apikey": key, "Content-Type": "application/json"}, timeout=20)
+          import os, requests
+          url=os.environ["SUPABASE_URL"].rstrip("/")
+          key=os.environ["SUPABASE_SERVICE_KEY"]
+          r=requests.get(f"{url}/rest/v1/products?select=id&limit=1",headers={"apikey":key,"Content-Type":"application/json"},timeout=20)
           print(f"Supabase HTTP: {r.status_code}")
           print(f"Supabase cevap: {r.text[:500]}")
           r.raise_for_status()
           PY
-
-      - name: Botu çalıştır
+      - name: Amazon botu
         timeout-minutes: 8
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python bot.py
+      - name: Hepsiburada + Trendyol keşfi
+        timeout-minutes: 8
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python marketplaces.py
