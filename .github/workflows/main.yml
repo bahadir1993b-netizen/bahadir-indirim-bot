@@ -4,7 +4,6 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    # Bağımsız tarama, hızlı Telegram kaynak işinin arkasından çalışsın.
     - cron: "2-59/10 * * * *"
 
 concurrency:
@@ -63,5 +62,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+          AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: python marketplace_scanner.py
