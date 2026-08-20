@@ -45,16 +45,14 @@ def unwrap(u):
         if not nxt and 'bing.com' in p.netloc.lower() and q.get('u'):
             raw=q['u'][0]
             if raw.startswith('a1'):
-                try:
-                    nxt=base64.urlsafe_b64decode(raw[2:]+'='*((4-len(raw[2:])%4)%4)).decode('utf-8','ignore')
-                except: pass
+                try:nxt=base64.urlsafe_b64decode(raw[2:]+'='*((4-len(raw[2:])%4)%4)).decode('utf-8','ignore')
+                except:pass
         if not nxt: break
         u=nxt
     return u
 
 def marketplace_url(site,raw,base=''):
-    u=unwrap(raw); u=urljoin(base,u)
-    p=urlparse(u); domain=SITES[site]
+    u=unwrap(raw); u=urljoin(base,u); p=urlparse(u); domain=SITES[site]
     if domain not in p.netloc.lower(): return None
     if site=='Trendyol' and not re.search(r'-p-\d+(?:[/?#]|$)',p.path,re.I): return None
     if site=='Hepsiburada' and not re.search(r'-p-[A-Za-z0-9]+(?:[/?#]|$)',p.path,re.I): return None
@@ -63,8 +61,7 @@ def marketplace_url(site,raw,base=''):
 def add(site,raw,title,text,out,seen):
     u=marketplace_url(site,raw)
     if not u or u in seen:return
-    seen.add(u); ps=prices(text)
-    out.append((u,re.sub(r'\s+',' ',title or 'Ürün').strip()[:300],ps))
+    seen.add(u); ps=prices(text); out.append((u,re.sub(r'\s+',' ',title or 'Ürün').strip()[:300],ps))
     print(f'{site} aday: {title[:100] if title else "Ürün"} | snippet fiyatları={ps[:8]} | {u}')
 
 def extract_search(site,html,base):
@@ -77,40 +74,51 @@ def extract_search(site,html,base):
         for a in block.find_all('a',href=True):
             add(site,a.get('href'),a.get_text(' ',strip=True) or text[:180],text,out,seen)
             if len(out)>=MAX_PRODUCTS:return out
-    # Search-result HTML often contains encoded target URLs outside normal result blocks.
-    domains=[re.escape(SITES[site]),re.escape('www.'+SITES[site])]
-    patterns=[r'https?://(?:www\.)?'+domains[0]+r'/[^"\'<>\s]+-p-[A-Za-z0-9]+',r'/(?:[^"\'<>\s]+)-p-[A-Za-z0-9]+']
-    for pat in patterns:
+    # HTML içindeki çıplak/escape edilmiş ürün URL'leri de tara.
+    pats=[r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^"\'<>\s]+-p-[A-Za-z0-9]+',r'/(?:[^"\'<>\s]+)-p-[A-Za-z0-9]+']
+    for pat in pats:
         for href in re.findall(pat,raw,re.I):
             add(site,href,'Arama sonucu',raw,out,seen)
             if len(out)>=MAX_PRODUCTS:return out
     return out
 
 def engine_search(site,term,engine):
-    domain=SITES[site]
-    # Do not use inurl:-p-: Google/Bing/Yahoo interpret that inconsistently and it was the main reason we got 0 candidates.
-    query=f'site:{domain} {term} (TL OR ₺)'
-    q=quote(query)
-    urls={
-      'bing':f'https://www.bing.com/search?q={q}&count=30',
-      'google':f'https://www.google.com/search?q={q}&num=30&filter=0',
-      'yahoo':f'https://search.yahoo.com/search?p={q}&n=30',
-      'duck':f'https://html.duckduckgo.com/html/?q={q}'
-    }
+    domain=SITES[site]; query=f'site:{domain} {term} (TL OR ₺)'; q=quote(query)
+    urls={'bing':f'https://www.bing.com/search?q={q}&count=30','google':f'https://www.google.com/search?q={q}&num=30&filter=0','yahoo':f'https://search.yahoo.com/search?p={q}&n=30','duck':f'https://html.duckduckgo.com/html/?q={q}'}
     try:
-        r=requests.get(urls[engine],headers=HEADERS,timeout=15,allow_redirects=True)
-        print(f'{site} {engine} [{term}] HTTP: {r.status_code}')
+        r=requests.get(urls[engine],headers=HEADERS,timeout=15,allow_redirects=True); print(f'{site} {engine} [{term}] HTTP: {r.status_code}')
         if r.status_code>=400:return []
-        return extract_search(site,r.text,urls[engine])
-    except Exception as e:
-        print(f'{site} {engine} hata: {type(e).__name__}: {e}'); return []
+        got=extract_search(site,r.text,urls[engine]); print(f'{site} {engine} [{term}] aday: {len(got)}'); return got
+    except Exception as e: print(f'{site} {engine} hata: {type(e).__name__}: {e}'); return []
 
-def discover(site):
+def direct_search(site,term,browser):
+    url=('https://www.hepsiburada.com/ara?q=' if site=='Hepsiburada' else 'https://www.trendyol.com/sr?q=')+quote(term)
+    page=browser.new_page(); page.set_default_timeout(5000); page.set_default_navigation_timeout(15000); out=[]; seen=set()
+    try:
+        r=page.goto(url,wait_until='domcontentloaded'); status=r.status if r else 0; print(f'{site} direkt [{term}] HTTP: {status}')
+        if not r or status>=400:return []
+        page.wait_for_timeout(1800); html=page.content(); out=extract_search(site,html,url)
+        if not out:
+            # JS ile üretilen sayfada tüm href'leri ayrıca oku.
+            for a in page.locator('a[href]').all():
+                try:add(site,a.get_attribute('href'),a.inner_text(timeout=200),a.inner_text(timeout=200),out,seen)
+                except:pass
+                if len(out)>=MAX_PRODUCTS:break
+        print(f'{site} direkt [{term}] aday: {len(out)}'); return out
+    except Exception as e: print(f'{site} direkt hata: {type(e).__name__}: {e}'); return []
+    finally: page.close()
+
+def discover(site,browser):
     found=[];seen=set()
+    # Önce gerçek marketplace arama sayfası; arama motorları sadece yedek.
+    for term in TERMS:
+        for item in direct_search(site,term,browser):
+            if item[0] not in seen:seen.add(item[0]);found.append(item)
+            if len(found)>=MAX_PRODUCTS:return found
     for term in TERMS:
         for engine in ('bing','google','yahoo','duck'):
             for item in engine_search(site,term,engine):
-                if item[0] not in seen: seen.add(item[0]); found.append(item)
+                if item[0] not in seen:seen.add(item[0]);found.append(item)
                 if len(found)>=MAX_PRODUCTS:return found
     return found
 
@@ -142,7 +150,7 @@ def product_page(site,url,title,search_prices,browser):
                 print(f'{site} ürün engelli; arama sonucu fiyatı kullanılıyor: {ps[:8]}')
                 return {'url':url,'title':title,'current':cur,'previous':prev}
             return None
-        page.wait_for_timeout(1200); html=page.content(); name,jd=jsonld(html); vals=list(jd)
+        page.wait_for_timeout(1200); html=page.content(); name,jd=jsonld(html)
         if site=='Trendyol':
             sels=['meta[property="product:price:amount"]','meta[itemprop="price"]','[data-testid="price-current"]','[class*="prc-dsc"]','[class*="price-current"]']
             olds=['[class*="prc-org"]','[class*="price-original"]','[class*="original-price"]','[class*="strike"]']
@@ -154,8 +162,7 @@ def product_page(site,url,title,search_prices,browser):
                 try:
                     loc=page.locator(sel)
                     for i in range(min(loc.count(),10)):
-                        raw=loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=300)
-                        x=price(raw)
+                        raw=loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=300); x=price(raw)
                         if x is not None:return x
                 except:pass
             return None
@@ -185,12 +192,13 @@ def history(url):
 def process(p):
     try:
         now=datetime.now(timezone.utc).isoformat(); rows=sb('GET','products',params={'select':'*','product_url':f'eq.{p["url"]}','limit':'1'}); row=rows[0] if rows else None
-        old=history(p['url']); base=p.get('previous') or (max(old) if old else None)
-        payload={'product_name':p['title'],'current_price':p['current'],'previous_price':p.get('previous'),'product_url':p['url'],'site':p['site'],'updated_at':now}
+        old=history(p['url']); previous_observed=old[0] if old else None
+        base=previous_observed
+        payload={'product_name':p['title'],'current_price':p['current'],'previous_price':previous_observed,'product_url':p['url'],'site':p['site'],'updated_at':now}
         if row:sb('PATCH',f'products?id=eq.{row["id"]}',json=payload)
         else:row=(sb('POST','products',json=payload) or [payload])[0]
         sb('POST','price_history',json={'price':p['current'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
-        print(f'Kontrol: {p["site"]} | mevcut={p["current"]:.2f} | baz={base or 0:.2f} | geçmiş={len(old)}')
+        print(f'Kontrol: {p["site"]} | mevcut={p["current"]:.2f} | son gözlenen={base or 0:.2f} | geçmiş={len(old)}')
         if not base or base<=p['current']:return False
         disc=(base-p['current'])/base*100
         if disc<MIN_DISCOUNT:return False
@@ -210,7 +218,7 @@ def main():
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=True,args=['--no-sandbox','--disable-blink-features=AutomationControlled'])
         for site in SITES:
-            items=discover(site); print(f'{site}: {len(items)} aday')
+            items=discover(site,browser); print(f'{site}: {len(items)} aday')
             for url,title,search_prices in items:
                 data=product_page(site,url,title,search_prices,browser)
                 if data:
