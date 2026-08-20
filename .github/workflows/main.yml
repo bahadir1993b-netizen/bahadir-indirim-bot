@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
       actions: write
     steps:
       - name: Otomatik çalışma kontrolü
@@ -97,8 +97,7 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: python marketplace_scanner.py
 
-      # Schedule veya manuel çalıştırma bittikten sonra da zinciri sürdür.
-      # repository_dispatch ile tetiklenen run da aynı şekilde devam eder.
+      # Her çalışma bitince yeni taramayı başlat.
       - name: Sonraki taramayı başlat
         if: always()
         env:
