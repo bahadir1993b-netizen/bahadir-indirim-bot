@@ -1,14 +1,9 @@
 name: Bahadir Telegram Kaynak Tarama
 
+# Bu workflow artık ana 5 dakikalık taramayla çakışmıyor.
+# İhtiyaç halinde manuel çalıştırılabilir.
 on:
-  push:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
-
-concurrency:
-  group: bahadir-indirim-telegram-fast
-  cancel-in-progress: true
 
 jobs:
   telegram:
