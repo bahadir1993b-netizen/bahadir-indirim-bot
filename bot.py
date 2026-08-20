@@ -48,9 +48,8 @@ def valid(site,u):
 
 def unwrap(u):
     u=unquote(u or '').replace('\\/','/')
-    for _ in range(2):
-        q=parse_qs(urlparse(u).query)
-        found=None
+    for _ in range(3):
+        q=parse_qs(urlparse(u).query);found=None
         for k in ('url','uddg','u','q','target'):
             if q.get(k) and q[k][0].startswith(('http://','https://')):found=q[k][0];break
         if not found:break
@@ -70,45 +69,51 @@ def candidates(site,html,base):
     for a in soup.find_all('a',href=True):
         add_url(site,a.get('href'),base,out,seen,a.get('title') or a.get('aria-label') or a.get_text(' ',strip=True))
         if len(out)>=MAX_PRODUCTS_PER_SITE:return out
-    # Search-engine HTML often hides result URLs in JSON/script rather than anchors.
     if site=='Amazon':
         pats=[r'https?://(?:www\.)?amazon\.com\.tr/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}',r'/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}']
-    elif site=='Trendyol':pats=[r'https?://(?:www\.)?trendyol\.com/[^"\'<>\\ ]+-p-\d+',r'[^"\'<>\\ ]+-p-\d+']
-    else:pats=[r'https?://(?:www\.)?hepsiburada\.com/[^"\'<>\\ ]+-p-[A-Za-z0-9]+',r'[^"\'<>\\ ]+-p-[A-Za-z0-9]+']
+    elif site=='Trendyol':
+        pats=[r'https?://(?:www\.)?trendyol\.com/[^"\'<>\\ ]+-p-\d+',r'[^"\'<>\\ ]+-p-\d+']
+    else:
+        pats=[r'https?://(?:www\.)?hepsiburada\.com/[^"\'<>\\ ]+-p-[A-Za-z0-9]+',r'[^"\'<>\\ ]+-p-[A-Za-z0-9]+']
     for pat in pats:
         for m in re.findall(pat,html,re.I):
             add_url(site,m,base,out,seen)
             if len(out)>=MAX_PRODUCTS_PER_SITE:return out
-    print(f'{site} aday sayısı: {len(out)}');return out
+    return out
+
+def rss_candidates(site,term):
+    domain='hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com'
+    q=quote(f'site:{domain} {term}')
+    urls=[f'https://www.bing.com/search?format=rss&q={q}',f'https://html.duckduckgo.com/html/?q={q}']
+    out=[];seen=set()
+    for u in urls:
+        try:
+            r=requests.get(u,headers=HEADERS,timeout=8)
+            print(f'{site} arama {urlparse(u).netloc} [{term}] HTTP: {r.status_code}')
+            if not r.ok:continue
+            got=candidates(site,r.text,u)
+            for x in got:
+                if x[0] not in seen:seen.add(x[0]);out.append(x)
+            if len(out)>=MAX_PRODUCTS_PER_SITE:return out[:MAX_PRODUCTS_PER_SITE]
+        except Exception as e:print(f'{site} arama hata: {type(e).__name__}: {e}')
+    return out
+
+def search_fallback(site):
+    terms=['indirim','çok satan','elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam']
+    for term in terms:
+        got=rss_candidates(site,term)
+        print(f'{site} arama [{term}] aday: {len(got)}')
+        if got:return got
+    return []
 
 def discover(site,seed,browser):
     page=browser.new_page();page.set_default_timeout(4000);page.set_default_navigation_timeout(15000)
     try:
         r=page.goto(seed,wait_until='domcontentloaded');status=r.status if r else 0;print(f'{site} web HTTP: {status}')
         if not r:return []
-        page.wait_for_timeout(1200)
-        got=candidates(site,page.content(),seed)
-        if got:return got
-        # Even if the site returned 403, browser HTML can contain useful challenge/result links.
-        return candidates(site,page.content(),seed)
+        page.wait_for_timeout(1200);return candidates(site,page.content(),seed)
     except Exception as e:print(f'{site} discover hata: {type(e).__name__}: {e}');return []
     finally:page.close()
-
-def search_fallback(site):
-    domain='hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com'
-    terms=['indirim','elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam']
-    for term in terms:
-        q=quote(f'site:{domain} inurl:-p- {term}')
-        for engine in ('bing','google'):
-            try:
-                u=f'https://www.{engine}.com/search?q={q}&num=10'
-                r=requests.get(u,headers=HEADERS,timeout=8)
-                print(f'{site} {engine} [{term}] HTTP: {r.status_code}')
-                got=candidates(site,r.text,u)
-                print(f'{site} {engine} [{term}] aday: {len(got)}')
-                if got:return got
-            except Exception as e:print(f'{site} {engine} hata: {type(e).__name__}: {e}')
-    return []
 
 def jsonld_all(html):
     vals=[];name=None
@@ -119,16 +124,16 @@ def jsonld_all(html):
                 if not isinstance(o,dict):continue
                 typ=o.get('@type')
                 if typ=='Product' or 'Product' in (typ or []):
-                    name=name or o.get('name')
-                    off=o.get('offers') or {}
+                    name=name or o.get('name');off=o.get('offers') or {}
                     if isinstance(off,list):
                         for z in off:
                             if isinstance(z,dict):
-                                p=price(z.get('price') or z.get('lowPrice'))
-                                if p:vals.append(p)
+                                for k in ('price','lowPrice'):
+                                    p=price(z.get(k));
+                                    if p:vals.append(p)
                     elif isinstance(off,dict):
                         for k in ('price','lowPrice','highPrice'):
-                            p=price(off.get(k))
+                            p=price(off.get(k));
                             if p:vals.append(p)
         except:pass
     return name,vals
@@ -137,9 +142,10 @@ def product_page(site,url,title,browser):
     page=browser.new_page();page.set_default_timeout(3500);page.set_default_navigation_timeout(12000)
     try:
         r=page.goto(url,wait_until='domcontentloaded');status=r.status if r else 0;print(f'{site} ürün HTTP: {status}')
+        # 403 pages are challenge pages; do not treat their challenge numbers as product prices.
         if not r or status>=400:return None
         page.wait_for_timeout(900);html=page.content();text=page.locator('body').inner_text(timeout=3500)
-        jd_name,jd_prices=jsonld_all(html); vals=list(jd_prices)
+        jd_name,jd_prices=jsonld_all(html);vals=list(jd_prices)
         selectors=['.a-price .a-offscreen','#corePrice_feature_div .a-offscreen','.apexPriceToPay .a-offscreen','.a-text-price .a-offscreen','.priceBlockStrikePriceString','.basisPrice .a-offscreen','meta[property="product:price:amount"]','meta[itemprop="price"]','[data-test-id*="price"]','[class*="price"]']
         for sel in selectors:
             try:
@@ -149,9 +155,7 @@ def product_page(site,url,title,browser):
                     v=price(raw)
                     if v and 1<v<10000000:vals.append(v)
             except:pass
-        # Last resort: price tokens from visible text, but discard obvious tiny values.
-        vals.extend(prices(text))
-        vals=sorted(set(v for v in vals if 1<v<10000000))
+        vals.extend(prices(text));vals=sorted(set(v for v in vals if 1<v<10000000))
         if not vals:return None
         cur=vals[0];prev=next((v for v in vals if v>cur*1.03),None)
         name=jd_name or title or 'Ürün'
@@ -175,10 +179,9 @@ def process(p):
         now=datetime.now(timezone.utc).isoformat();payload={'product_name':p['name'],'current_price':p['price'],'previous_price':p.get('previous'),'product_url':p['url'],'site':p['site'],'updated_at':now}
         if rows:row=rows[0];sb('PATCH',f'products?id=eq.{row["id"]}',json=payload)
         else:row=(sb('POST','products',json=payload) or [payload])[0]
-        old=history(p['url'])
-        sb('POST','price_history',json={'price':p['price'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
+        old=history(p['url']);sb('POST','price_history',json={'price':p['price'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
         base=p.get('previous')
-        if not base and old:base=old[0]
+        if not base and old:base=max(old)
         print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | baz={base or 0:.2f} | geçmiş={len(old)}')
         if not base or base<=p['price']:return False
         disc=(base-p['price'])/base*100
