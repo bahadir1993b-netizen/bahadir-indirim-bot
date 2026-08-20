@@ -9,8 +9,7 @@ TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; CHANNEL_ID='-1004424116637'
 SUPABASE_URL=os.environ['SUPABASE_URL'].rstrip('/'); SUPABASE_KEY=os.environ['SUPABASE_SERVICE_KEY']
 HEADERS={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
 SEEDS={'Amazon':'https://www.amazon.com.tr/gp/goldbox','Hepsiburada':'https://www.hepsiburada.com/ara?q=indirim','Trendyol':'https://www.trendyol.com/sr?q=indirim'}
-MIN_DISCOUNT=10.0; COOLDOWN=12; MAX_PRODUCTS_PER_SITE=2; HISTORY_DAYS=90; MIN_HISTORY=3
-
+MIN_DISCOUNT=10.0; COOLDOWN=12; MAX_PRODUCTS_PER_SITE=5; HISTORY_DAYS=90; MIN_HISTORY=2
 
 def sb(method,path,**kwargs):
     h={'apikey':SUPABASE_KEY,'Authorization':f'Bearer {SUPABASE_KEY}','Content-Type':'application/json','Accept':'application/json'}
@@ -72,7 +71,7 @@ def candidates(site,html,base):
     for m in re.finditer(pat,html,re.I):
         add(m.group(0))
         if len(out)>=MAX_PRODUCTS_PER_SITE:break
-    print(f'{site} adaylar: {[u for u,_ in out]}');return out
+    print(f'{site} aday sayısı: {len(out)}');return out
 
 def sitemap_fallback(site):
     domain='https://www.hepsiburada.com' if site=='Hepsiburada' else 'https://www.trendyol.com'
@@ -80,44 +79,35 @@ def sitemap_fallback(site):
         r=requests.get(domain+'/sitemap.xml',headers=HEADERS,timeout=6)
         print(f'{site} sitemap HTTP: {r.status_code}')
         if not r.ok:return []
-        xml=r.text[:2000000]
-        locs=re.findall(r'<loc>\s*(.*?)\s*</loc>',xml,re.I|re.S)
-        product_sitemaps=[u for u in locs if 'sitemap' in u.lower()]
-        pages=product_sitemaps[:4] if product_sitemaps else [domain+'/sitemap.xml']
-        out=[]
+        xml=r.text[:2000000];locs=re.findall(r'<loc>\s*(.*?)\s*</loc>',xml,re.I|re.S)
+        pages=[u for u in locs if 'sitemap' in u.lower()][:4] or [domain+'/sitemap.xml'];out=[]
         for sm in pages:
             try:
                 rr=requests.get(unescape_xml(sm),headers=HEADERS,timeout=6)
                 if not rr.ok:continue
-                text=unescape_xml(rr.text[:3000000])
-                urls=re.findall(r'<loc>\s*(https?://[^<\s]+)\s*</loc>',text,re.I)
-                for u in urls:
+                for u in re.findall(r'<loc>\s*(https?://[^<\s]+)\s*</loc>',unescape_xml(rr.text[:3000000]),re.I):
                     u=canonical(u)
                     if valid(site,u) and all(u!=x[0] for x in out):
                         out.append((u,'Ürün'))
                         if len(out)>=MAX_PRODUCTS_PER_SITE:return out
             except Exception:pass
-        print(f'{site} sitemap adaylar: {[u for u,_ in out]}')
         return out
-    except Exception as e:
-        print(f'{site} sitemap hata: {type(e).__name__}: {e}');return []
+    except Exception as e:print(f'{site} sitemap hata: {type(e).__name__}: {e}');return []
 
-def unescape_xml(s):
-    return s.replace('&amp;','&').replace('&quot;','"').replace('&#x2F;','/').replace('&#47;','/')
+def unescape_xml(s):return s.replace('&amp;','&').replace('&quot;','"').replace('&#x2F;','/').replace('&#47;','/')
 
 def discover(site,seed,browser):
     page=browser.new_page();page.set_default_timeout(2500);page.set_default_navigation_timeout(12000)
     try:
         r=page.goto(seed,wait_until='domcontentloaded');print(f'{site} web HTTP: {r.status if r else 0}')
         if not r or r.status>=400:return []
-        page.wait_for_timeout(500);return candidates(site,page.content(),seed)
+        page.wait_for_timeout(700);return candidates(site,page.content(),seed)
     except Exception as e:print(f'{site} discover hata: {type(e).__name__}: {e}');return []
     finally:page.close()
 
 def search_fallback(site):
     domain='hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com'
-    terms=['elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam','indirim']
-    for term in terms:
+    for term in ['elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam','indirim']:
         q=quote(f'site:{domain} {term}')
         for engine in ('bing','google'):
             try:
@@ -141,34 +131,31 @@ def jsonld(html):
     return {}
 
 def product_page(site,url,title,browser):
-    page=browser.new_page();page.set_default_timeout(1800);page.set_default_navigation_timeout(9000)
+    page=browser.new_page();page.set_default_timeout(2200);page.set_default_navigation_timeout(10000)
     try:
-        r=page.goto(url,wait_until='domcontentloaded');print(f'{site} ürün HTTP: {r.status if r else 0} | {url[:110]}')
+        r=page.goto(url,wait_until='domcontentloaded');print(f'{site} ürün HTTP: {r.status if r else 0}')
         if not r or r.status>=400:return None
-        page.wait_for_timeout(400);html=page.content();text=page.locator('body').inner_text(timeout=1800);jd=jsonld(html)
-        cur=jd.get('price');prev=None
-        if site=='Amazon':
-            vals=[]
-            for sel in ('.a-price .a-offscreen','#corePrice_feature_div .a-offscreen','.apexPriceToPay .a-offscreen','meta[property="product:price:amount"]'):
-                try:
-                    loc=page.locator(sel);n=min(loc.count(),3)
-                    for i in range(n):
-                        v=price(loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=500))
-                        if v:vals.append(v)
-                except:pass
-            if vals:
-                cur=cur or min(vals);b=[v for v in vals if cur and v>cur*1.03];prev=min(b) if b else None
-            for sel in ('.a-text-price .a-offscreen','.priceBlockStrikePriceString','.basisPrice .a-offscreen'):
-                if prev is not None:break
-                try:
-                    v=price(page.locator(sel).first.inner_text(timeout=500))
-                    if v and cur and v>cur:prev=v
-                except:pass
+        page.wait_for_timeout(500);html=page.content();text=page.locator('body').inner_text(timeout=2200);jd=jsonld(html)
+        cur=jd.get('price');prev=None; vals=[]
+        selectors=['.a-price .a-offscreen','#corePrice_feature_div .a-offscreen','.apexPriceToPay .a-offscreen','.a-text-price .a-offscreen','.priceBlockStrikePriceString','.basisPrice .a-offscreen','meta[property="product:price:amount"]','[data-test-id*="price"]','[class*="price"]']
+        for sel in selectors:
+            try:
+                loc=page.locator(sel);n=min(loc.count(),8)
+                for i in range(n):
+                    raw=loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=300)
+                    v=price(raw)
+                    if v and v>0:vals.append(v)
+            except:pass
+        allp=[x for x in vals if x]
+        if cur is None and allp:cur=min(allp)
         if cur is None:cur=min(prices(text),default=None)
         if not cur:return None
+        higher=sorted(set(v for v in allp if v>cur*1.03))
+        if higher:prev=higher[0]
         name=jd.get('name') or title
         try:name=page.locator('meta[property="og:title"]').get_attribute('content') or name
         except:pass
+        print(f'{site} fiyat: {cur:.2f} | önceki: {prev or 0:.2f}')
         return {'name':re.sub(r'\s+',' ',name or 'Ürün').strip()[:300],'price':cur,'previous':prev,'url':canonical(url),'site':site}
     except Exception as e:print(f'{site} ürün hata: {type(e).__name__}: {e}');return None
     finally:page.close()
@@ -188,6 +175,7 @@ def process(p):
         sb('POST','price_history',json={'price':p['price'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
         h=history(p['url']);base=p.get('previous')
         if not base and len(h)>=MIN_HISTORY:base=max(h)
+        print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | baz={base or 0:.2f} | geçmiş={len(h)}')
         if not base or base<=p['price']:return False
         if h and min(h)<p['price']*0.95:return False
         disc=(base-p['price'])/base*100
@@ -197,9 +185,9 @@ def process(p):
             try:
                 if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):return False
             except:pass
-        msg=f"🔥 %{disc:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {p['price']:,.2f} TL\n🏷️ Önce: {base:,.2f} TL\n🛍️ {p['site']} 🔗 {p['url']}"
+        msg=f"🔥 %{disc:.0f} İNDİRİM\n\n{p['name']}\n\n💰 {p['price']:,.2f} TL\n🏷️ Önce: {base:,.2f} TL\n🛍️ {p['site']}\n🔗 {p['url']}"
         r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':msg},timeout=8)
-        print(f'Telegram gönderim HTTP: {r.status_code}')
+        print(f'Telegram gönderim HTTP: {r.status_code} | {r.text[:200]}')
         if r.ok:
             try:sb('PATCH',f'products?id=eq.{row.get("id")}',json={'last_posted_at':now,'last_posted_price':p['price']})
             except:pass
