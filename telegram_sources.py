@@ -252,7 +252,8 @@ def main():
                         candidates.append((source,item)); print(f'Aday: {item[0]} | {item[2][:80]} | {item[3]:.2f} TL | kaynak={source} | eski={item[4]}')
         finally:browser.close()
     for source,item in candidates:
-        try:sent+=1 if send(*item[:7],item[7]) else 0
+        try:
+            sent += 1 if send(item[0],item[1],item[2],item[3],item[4],source,item[5],item[6],item[7]) else 0
         except Exception as e:print(f'Ürün işlem hata {source}: {type(e).__name__}: {e}')
     print(f'=== Telegram fırsat keşfi bitti. Aday={len(candidates)} Gönderilen={sent} ===')
 
