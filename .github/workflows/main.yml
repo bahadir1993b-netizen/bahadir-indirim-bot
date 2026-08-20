@@ -71,7 +71,7 @@ jobs:
         run: |
           python apply_priority_runtime_patch.py
           python apply_telegram_runtime_patch.py
-          sed -i 's/^MAX_AGE=.*/MAX_AGE=15/' telegram_sources.py
+          sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
           python telegram_sources.py || true
           python apply_marketplace_runtime_patch.py
           python apply_scanner_runtime_patch.py
@@ -97,7 +97,7 @@ jobs:
 
             python apply_priority_runtime_patch.py
             python apply_telegram_runtime_patch.py
-            sed -i 's/^MAX_AGE=.*/MAX_AGE=15/' telegram_sources.py
+            sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
             python telegram_sources.py
 
             python apply_marketplace_runtime_patch.py
