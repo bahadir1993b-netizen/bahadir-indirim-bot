@@ -6,7 +6,7 @@ TOKEN=os.environ['TELEGRAM_BOT_TOKEN']
 SUPABASE_URL=os.environ['SUPABASE_URL'].rstrip('/')
 SUPABASE_KEY=os.environ['SUPABASE_SERVICE_KEY']
 CHANNEL_ID='-1004424116637'
-MAX_AGE_HOURS=3
+MAX_AGE_MINUTES=45
 SOURCES={'OnuAl':'onual_firsat','Enes ÖZEN':'enesozen','İndirim Bakanlığı':'indirimbakanligi','Cihaz.TV':'cihaztv'}
 SITES=('Amazon','Hepsiburada','Trendyol')
 COMMON={'INDIRIM','KAMPANYA','FIRSAT','KODU','KOD','KUPON','PROMOSYON','AMAZON','HEPSIBURADA','TRENDYOL','TL','TRY','MOBIL','UYGULAMADA','SEPETTE'}
@@ -21,12 +21,11 @@ def seen(key): return bool(sb('GET','price_history',params={'select':'recorded_a
 def remember(key): sb('POST','price_history',json={'price':0,'product_url':f'coupon://{key}','site':'coupon','recorded_at':datetime.now(timezone.utc).isoformat()})
 
 def extract_code(text):
-    up=text.upper()
     patterns=[r'\b(?:KOD|KODU|KUPON|KUPON KODU|PROMOSYON(?: KODU)?)\s*[:=\-]?\s*([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{3,23})\b',r'\b([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\s+(?:KOD(?:U)?|KUPON(?:U)?)\b']
     for pat in patterns:
-        for m in re.finditer(pat,up,re.I):
+        for m in re.finditer(pat,text,re.I):
             code=m.group(1).strip(' -_:')
-            if code.isdigit() or code in COMMON or re.fullmatch(r'\d+(?:[.,]\d+)?\s*(?:TL|₺)?',code,re.I): continue
+            if code.isdigit() or code in COMMON or not re.search(r'[A-ZÇĞİÖŞÜ]',code,re.I): continue
             return code
     return None
 
@@ -36,8 +35,28 @@ def site_of(text):
         if s.lower() in t:return s
     return None
 
-def price_text(text):
-    m=re.search(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:tl|₺)',text,re.I); return m.group(0) if m else None
+def money_values(text):
+    return [m.group(0).strip() for m in re.finditer(r'(?<![A-ZÇĞİÖŞÜ])\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?\s*(?:tl|₺)(?![A-ZÇĞİÖŞÜ])',text,re.I)]
+
+def discount_amount(text):
+    m=re.search(r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)\s*(?:TL|₺)\s*(?:İNDİRİM|INDIRIM|KAZANÇ|KAZANC|AVANTAJ)',text,re.I)
+    return f'{m.group(1)} TL' if m else None
+
+def min_spend(text):
+    patterns=[r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)\s*(?:TL|₺)\s*(?:ve|üzeri|uzeri|üzerine|tutar|alışveriş|alisveris)',r'(?:minimum|min\.?|en az)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)\s*(?:TL|₺)']
+    for pat in patterns:
+        m=re.search(pat,text,re.I)
+        if m:return ' '.join(m.group(0).split())
+    return None
+
+def conditions(raw,code):
+    parts=re.split(r'\n+|(?<=[.!?])\s+',raw); keys=('alt limit','minimum','min.','en az','üzeri','uzeri','üzerine','uzerine','sepet','adet','ürün','urun','kategori','marka','geçerli','gecerli','kod','kupon','kampanya','alışveriş','alisveris','hariç','haric'); out=[]
+    for part in parts:
+        p=' '.join(part.split()).strip(' -•')
+        if not p:continue
+        if re.fullmatch(r'(?:KOD|KODU|KUPON|KUPON KODU)\s*[:=\-]?\s*'+re.escape(code),p,re.I):continue
+        if any(k in p.lower() for k in keys) and p not in out: out.append(p)
+    return out[:5]
 
 def product_link(block,site):
     for a in block.find_all('a',href=True):
@@ -46,14 +65,6 @@ def product_link(block,site):
         if site=='Hepsiburada' and ('hepsiburada.com' in u or 'hb.biz' in u):return u
         if site=='Trendyol' and ('trendyol.com' in u or 'ty.gl' in u):return u
     return None
-
-def conditions(raw,code):
-    parts=re.split(r'(?<=[.!?])\s+|\n+',raw); keys=('alt limit','minimum','min.','üzeri','üzerine','sepet','adet','ürün','kategori','marka','geçerli','gecerli','kod','kupon','kampanya'); out=[]
-    for part in parts:
-        p=' '.join(part.split()).strip(' -•')
-        if not p or code.upper() in p.upper(): continue
-        if any(k in p.lower() for k in keys) and p not in out: out.append(p)
-    return out[:4]
 
 def fetch(source,channel):
     url=f'https://t.me/s/{channel}'; r=requests.get(url,headers=HEADERS,timeout=20); print(f'Kupon kaynağı {source}: HTTP {r.status_code}')
@@ -65,7 +76,7 @@ def fetch(source,channel):
         try: dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
         except: continue
         age=now-dt
-        if age<timedelta(0) or age>timedelta(hours=MAX_AGE_HOURS):continue
+        if age<timedelta(0) or age>timedelta(minutes=MAX_AGE_MINUTES):continue
         text=block.select_one('.tgme_widget_message_text')
         if not text:continue
         raw=text.get_text('\n',strip=True); site=site_of(raw)
@@ -74,9 +85,12 @@ def fetch(source,channel):
         if not code:continue
         post_id=block.get('data-post','').split('/')[-1] or hashlib.sha1(raw.encode()).hexdigest()[:16]; key=f'{channel}:{post_id}:{code}'
         if seen(key):continue
-        link=product_link(text,site); source_link=f'https://t.me/{channel}/{post_id}' if post_id.isdigit() else url; p=price_text(raw); cond=conditions(raw,code)
+        link=product_link(text,site); source_link=f'https://t.me/{channel}/{post_id}' if post_id.isdigit() else url
+        prices=money_values(raw); disc=discount_amount(raw); minimum=min_spend(raw); cond=conditions(raw,code)
         lines=[f'🎟️ {site.upper()} İNDİRİM KODU','',f'🏷️ Kod: {code}']
-        if p: lines.append(f'💰 Kaynakta görünen fiyat: {p}')
+        if disc: lines.append(f'💸 İndirim: {disc}')
+        if minimum: lines.append(f'🛒 Minimum alışveriş: {minimum}')
+        elif prices: lines.append(f'💰 Kaynakta görünen fiyat: {prices[0]}')
         if cond: lines += ['', '📋 Kampanya şartları:'] + [f'• {x}' for x in cond]
         if link: lines += ['',f'🔗 Ürün/Kampanya: {link}']
         lines += ['',f'📌 Kaynak: {source}',f'🕒 Kaynak paylaşımı: {dt.astimezone().strftime("%d.%m.%Y %H:%M")}',f'🔎 Kaynak gönderisi: {source_link}']
