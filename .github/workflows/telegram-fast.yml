@@ -1,9 +1,10 @@
 name: Bahadir Telegram Kaynak Tarama
 
 on:
+  push:
   workflow_dispatch:
   schedule:
-    # Reklam/fırsat kanallarını bağımsız tarayıcıdan önce yakala.
+    # Fırsat/reklam kanallarını bağımsız taramadan önce yakala.
     - cron: "*/5 * * * *"
 
 concurrency:
@@ -33,11 +34,3 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
         run: python telegram_sources.py
-      - name: Güncel kupon ve kod monitörü
-        timeout-minutes: 2
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
-        run: python coupon_monitor.py
