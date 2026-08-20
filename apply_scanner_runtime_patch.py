@@ -16,6 +16,54 @@ def _raw_card_prices(text):
     return out
 
 
+def _amazon_http_candidates(query):
+    out, seen = [], set()
+    try:
+        url = 'https://www.amazon.com.tr/s?' + 'k=' + quote(query)
+        r = requests.get(url, headers=HEAD, timeout=10, allow_redirects=True)
+        if r.status_code >= 400:
+            return out
+        soup = BeautifulSoup(r.text, 'html.parser')
+        cards = soup.select('div[data-component-type="s-search-result"]')
+        for card in cards:
+            a = card.select_one('h2 a[href]') or card.select_one('a[href*="/dp/"]') or card.select_one('a[href*="/gp/product/"]')
+            if not a:
+                continue
+            href = a.get('href') or ''
+            if href.startswith('/'):
+                href = 'https://www.amazon.com.tr' + href
+            target = normalize('Amazon', href)
+            if not valid('Amazon', target) or target in seen:
+                continue
+            title = clean_title(a.get_text(' ', strip=True))
+            vals = []
+            for sel in ['.a-price .a-offscreen', '.a-text-price .a-offscreen', '[data-a-strike="true"] .a-offscreen']:
+                for el in card.select(sel):
+                    x = money(el.get_text(' ', strip=True))
+                    if x and x not in vals:
+                        vals.append(x)
+            if len(vals) < 2:
+                vals = _raw_card_prices(card.get_text(' ', strip=True))
+            if len(vals) < 2:
+                continue
+            current, previous = min(vals), max(vals)
+            if previous <= current or previous / max(current, 1) > 4.0:
+                continue
+            discount = (previous-current) / previous * 100
+            if discount < MIN_DISCOUNT:
+                continue
+            if BOOK_RE.search(title):
+                continue
+            seen.add(target)
+            out.append((target, title if len(title) >= 10 else 'Ürün', current, previous))
+            _CANDIDATE_PREVIOUS[target] = previous
+            if len(out) >= 8:
+                break
+    except Exception as e:
+        print(f'AMAZON HTTP ARAMA HATA | {query} | {type(e).__name__}: {e}')
+    return out
+
+
 def _search_engine_candidates(site, query):
     domain = {'Amazon': 'amazon.com.tr', 'Hepsiburada': 'hepsiburada.com', 'Trendyol': 'trendyol.com'}[site]
     q = quote(f'site:{domain} {query} TL')
@@ -56,7 +104,7 @@ def _search_engine_candidates(site, query):
                 current, previous = min(vals), max(vals)
                 if previous <= current or previous / max(current, 1) > 4.0:
                     continue
-                discount = (previous - current) / previous * 100
+                discount = (previous-current)/previous*100
                 if discount < MIN_DISCOUNT:
                     continue
                 seen.add(target)
@@ -70,6 +118,13 @@ def _search_engine_candidates(site, query):
 
 
 def extract_search_candidates(page, site, query):
+    # Amazon bazen Playwright navigasyonunda "Download is starting" döndürüyor.
+    # Önce normal HTTP aramasıyla ürün kartlarını al; başarısızsa browser/search-engine fallback kullan.
+    if site == 'Amazon':
+        direct = _amazon_http_candidates(query)
+        if direct:
+            print(f'BAĞIMSIZ ARAMA | {site} | "{query}" | aday={len(direct)} | HTTP')
+            return direct
     try:
         page.goto(MARKETS[site][0] + quote(query), wait_until='domcontentloaded', timeout=12000)
         page.wait_for_timeout(1000)
@@ -170,4 +225,4 @@ verify = _verify_with_initial_reference
 
 P.write_text(s, encoding="utf-8")
 compile(s, str(P), "exec")
-print("Scanner runtime patch: stabil arama + affiliate + ilk gözlem referans fiyatı doğrulandı")
+print("Scanner runtime patch: Amazon HTTP fallback + stabil arama + affiliate + ilk gözlem referans fiyatı doğrulandı")
