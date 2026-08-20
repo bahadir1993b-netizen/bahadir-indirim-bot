@@ -1,9 +1,14 @@
 name: Bahadir Telegram Kaynak Tarama
 
-# Bu workflow artık ana 5 dakikalık taramayla çakışmıyor.
-# İhtiyaç halinde manuel çalıştırılabilir.
+# Telegram kaynakları hızlı katmandır: marketplace taramasından bağımsız çalışır.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: bahadir-telegram-scanner
+  cancel-in-progress: false
 
 jobs:
   telegram:
@@ -27,15 +32,17 @@ jobs:
       - name: Telegram kaynak ve görsel düzeltmeleri
         run: python apply_telegram_runtime_patch.py
       - name: Telegram fırsat keşfi
-        timeout-minutes: 4
+        timeout-minutes: 5
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
-        run: python telegram_sources.py
+        run: |
+          sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
+          python telegram_sources.py
       - name: Görsel kupon ve kod OCR taraması
-        timeout-minutes: 3
+        timeout-minutes: 2
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
