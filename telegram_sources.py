@@ -1,15 +1,20 @@
 import os,re,html as htmlmod,requests
 from datetime import datetime,timezone,timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse,urlunparse,parse_qsl,urlencode
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; SB=os.environ['SUPABASE_URL'].rstrip('/'); KEY=os.environ['SUPABASE_SERVICE_KEY']
 CHAT='-1004424116637'; MAX_AGE=90; MIN_DISCOUNT=10.0; COOLDOWN=12
+# Kendi Amazon affiliate tag'in daha sonra GitHub Actions secret olarak verilecek.
+AMAZON_TAG=os.getenv('AMAZON_ASSOCIATE_TAG','').strip()
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
 SOURCES={'OnuAl':'onual_firsat','EnesOzen':'enesozen'}
 MARKET={'amazon.com.tr':'Amazon','hepsiburada.com':'Hepsiburada','trendyol.com':'Trendyol'}
 SHORT={'app.hb.biz':'Hepsiburada','hps.im':'Hepsiburada','ty.gl':'Trendyol','tyml.gl':'Trendyol','link.amazon':'Amazon','amzn.to':'Amazon','amzn.eu':'Amazon','publicis.link':None,'onu.al':None,'sl.n11.com':'n11'}
+
+# OnuAl'in kendi affiliate/tracking parametreleri kesinlikle kullanıcıya gönderilmez.
+TRACKING_PARAMS={'utm_source','utm_medium','utm_campaign','utm_content','utm_term','fbclid','gclid','ref','ref_','tag'}
 
 def sb(method,path,**kw):
  h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
@@ -50,23 +55,43 @@ def valid(site,u):
  if site=='Amazon':return host.endswith('amazon.com.tr') and bool(re.search(r'/(?:dp|gp/product)/[A-Z0-9]{8,}',path,re.I))
  if site=='Hepsiburada':return host.endswith('hepsiburada.com') and bool(re.search(r'-p-[A-Za-z0-9]+(?:[/?#&]|$)',path,re.I))
  if site=='Trendyol':return host.endswith('trendyol.com') and bool(re.search(r'-p-\d+(?:[/?#&]|$)',path,re.I))
- return site in ('n11',) and ('n11.com' in host or 'sl.n11.com' in host)
+ return site=='n11' and ('n11.com' in host or 'sl.n11.com' in host)
+
+def clean(u):return htmlmod.unescape(u).replace('\\/','/').split('#',1)[0].rstrip('/')
+
+def normalize_market_url(site,u):
+ """Kaynak platformun affiliate/tracking linkini temizler; kendi tag'imizi ekler."""
+ u=clean(u); p=urlparse(u)
+ if site not in ('Amazon','Hepsiburada','Trendyol'):return u
+ qs=parse_qsl(p.query,keep_blank_values=True)
+ out=[]
+ for k,v in qs:
+  lk=k.lower()
+  if lk in TRACKING_PARAMS:continue
+  out.append((k,v))
+ if site=='Amazon' and AMAZON_TAG:
+  out.append(('tag',AMAZON_TAG))
+ return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(out,doseq=True),''))
 
 def resolve(page,u):
  try:
-  r=requests.get(u,headers=HEAD,timeout=8,allow_redirects=True);final=clean(r.url)
-  s=site_url(final)
-  if s and valid(s,final):return final
+  r=requests.get(u,headers=HEAD,timeout=8,allow_redirects=True);final=clean(r.url);s=site_url(final)
+  if s and valid(s,final):return normalize_market_url(s,final)
  except:pass
  host=urlparse(u).netloc.lower().replace('www.','')
  if host in SHORT or host.endswith('.onu.al') or host.endswith('.publicis.link'):
   try:
-   page.goto(u,wait_until='domcontentloaded',timeout=12000);page.wait_for_timeout(800);final=clean(page.url);s=site_url(final)
-   if s and valid(s,final):return final
+   page.goto(u,wait_until='domcontentloaded',timeout=12000);page.wait_for_timeout(1000)
+   final=clean(page.url);s=site_url(final)
+   if s and valid(s,final):return normalize_market_url(s,final)
+   # Bazı kısa linkler JS ile yönlenir; ilk gerçek marketplace href'ini de dene.
+   for a in page.locator('a[href]').all():
+    try:
+     href=clean(a.get_attribute('href') or '');ss=site_url(href)
+     if ss and valid(ss,href):return normalize_market_url(ss,href)
+    except:pass
   except:pass
  return clean(u)
-
-def clean(u):return htmlmod.unescape(u).replace('\\/','/').split('#',1)[0].rstrip('/')
 
 def seen(key):return bool(sb('GET','price_history',params={'select':'recorded_at','product_url':f'eq.telegram://{key}','limit':'1'}))
 def remember(key):sb('POST','price_history',json={'price':0,'product_url':f'telegram://{key}','site':'telegram','recorded_at':datetime.now(timezone.utc).isoformat()})
@@ -86,6 +111,7 @@ def send(site,url,title,current,previous,source,post_id,signal):
   if disc<MIN_DISCOUNT:remember(key);return False
  strong=bool(previous and previous>current) or bool(re.search(r'en düşük|son \d+ gün|son \d+ ay|son \d+ yıl|dip fiyat|ortalama fiyatın|düştü|sepette|kupon|kod(?:u)?|2 al 1|3 al 2|4 al 3|kampanya|indirim|aktif',signal,re.I))
  if not strong:remember(key);return False
+ url=normalize_market_url(site,url)
  row=save(site,url,title,current,previous);last=row.get('last_posted_at') if isinstance(row,dict) else None
  if last:
   try:
@@ -94,11 +120,13 @@ def send(site,url,title,current,previous,source,post_id,signal):
  lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else '🔥 SICAK FIRSAT','',title,'',f'💰 {current:,.2f} TL']
  if disc is not None:lines.append(f'🏷️ Önce: {previous:,.2f} TL')
  lines += [f'🛍️ {site}',f'🔗 {url}']
- if signal: lines += ['',f'📌 {re.sub(r"\s+"," ",signal)[:260]}']
+ if signal:
+  compact=re.sub(r'\s+',' ',signal)[:260]
+  lines += ['',f'📌 {compact}']
  lines += ['',f'Kaynak: {source}']
  requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':'\n'.join(lines)},timeout=15).raise_for_status()
  sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()});remember(key)
- print(f'GÖNDERİLDİ | {site} | {title[:70]} | {current:.2f} | kaynak={source}');return True
+ print(f'GÖNDERİLDİ | {site} | {title[:70]} | {current:.2f} | kaynak={source} | link={url}');return True
 
 def parse(block,channel,page):
  tm=block.select_one('time[datetime]')
@@ -106,7 +134,6 @@ def parse(block,channel,page):
  try:dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
  except:return None
  age=datetime.now(timezone.utc)-dt
- # Telegram web'deki datetime ile runner saat dilimi arasında fark olabiliyor; küçük gelecek farklarını da kabul et.
  if abs(age)>timedelta(minutes=MAX_AGE):return None
  node=block.select_one('.tgme_widget_message_text')
  if not node:return None
@@ -120,9 +147,9 @@ def parse(block,channel,page):
   if host not in MARKET and host not in SHORT and not host.endswith('.onu.al') and not host.endswith('.publicis.link'):continue
   r=resolve(page,u);s=site_url(r) or mapped or site_hint
   if s and s in ('Amazon','Hepsiburada','Trendyol'):
-   # Kısa Telegram linki çözülemezse bile kaynağın verdiği linki kullan; fırsatı kaçırma.
-   if valid(s,r):r=clean(r)
-   else:r=u
+   if valid(s,r):r=normalize_market_url(s,r)
+   elif mapped in ('Amazon','Hepsiburada','Trendyol'):r=u
+   else:continue
    if r not in [x[1] for x in links]:links.append((s,r))
  if not links:return None
  site,url=links[0];current,previous=extract_price_pair(raw)
