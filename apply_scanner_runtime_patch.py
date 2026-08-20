@@ -4,8 +4,8 @@ P = Path("marketplace_scanner.py")
 s = P.read_text(encoding="utf-8")
 marker = "if __name__ == '__main__':"
 
-# Amazon'un arama sayfası GitHub Actions'ta bazen HTML yerine indirme/redirect başlattığı
-# için doğrudan marketplace aramasına bağımlı kalma. Arama motorlarından ürün URL'si bul,
+# Marketplace arama sayfaları GitHub Actions'ta zaman zaman download/redirect/chrome-error
+# döndürebildiği için doğrudan aramaya bağımlı kalma. Arama motorlarından ürün URL'si bul,
 # ardından mevcut verify() ile gerçek ürün sayfasını doğrula.
 if "def _search_engine_candidates" not in s:
     patch = r'''
@@ -28,7 +28,6 @@ def _search_engine_candidates(site, query):
             for a in soup.find_all('a', href=True):
                 raw = a.get('href') or ''
                 title = clean_title(a.get_text(' ', strip=True))
-                # Google/Bing sonuç linklerini gerçek hedefe çevir.
                 target = raw
                 if raw.startswith('/url?'):
                     qs = dict(parse_qsl(urlparse(raw).query))
@@ -39,7 +38,7 @@ def _search_engine_candidates(site, query):
                 parent = a.parent.get_text(' ', strip=True) if a.parent else ''
                 card = (title + ' ' + parent)[:2500]
                 vals = prices(card)
-                if len(vals) < 1:
+                if not vals:
                     continue
                 seen.add(target)
                 current = min(vals)
@@ -54,9 +53,9 @@ def _search_engine_candidates(site, query):
     return out
 
 
-def extract_search_candidates(site, query):
-    # Önce normal marketplace sayfasını dene; Amazon'da download/redirect sorunu olursa
-    # veya sonuç çıkmazsa arama motoru fallback'i devreye girsin.
+def extract_search_candidates(page, site, query):
+    # Mevcut scanner bu fonksiyonu (page, site, query) olarak çağırıyor.
+    # Doğrudan marketplace araması çalışmazsa arama motoru fallback'i kullanılır.
     try:
         page_url = MARKETS[site][0] + quote(query)
         page.goto(page_url, wait_until='commit', timeout=12000)
@@ -102,7 +101,7 @@ def extract_search_candidates(site, query):
         raise SystemExit("main marker bulunamadı")
     s = s.replace(marker, patch + marker, 1)
 
-# Affiliate tag'in boş kalması durumunda bile bu sürümde doğru Amazon etiketi kullanılsın.
+# Affiliate tag'in boş kalması durumunda bile doğru Amazon etiketi kullanılsın.
 s = s.replace("AMAZON_TAG = os.getenv('AMAZON_ASSOCIATE_TAG', '').strip()", "AMAZON_TAG = os.getenv('AMAZON_ASSOCIATE_TAG', 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'")
 
 P.write_text(s, encoding="utf-8")
