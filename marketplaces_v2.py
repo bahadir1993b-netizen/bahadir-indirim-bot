@@ -43,19 +43,27 @@ def unwrap(u):
         for k in ('q','url','uddg','target','dest','destination'):
             if q.get(k) and q[k][0].startswith(('http://','https://')): nxt=unquote(q[k][0]); break
         if not nxt and 'bing.com' in p.netloc.lower() and q.get('u'):
-            raw=q['u'][0]
+            raw=unquote(q['u'][0])
             if raw.startswith('a1'):
                 try:nxt=base64.urlsafe_b64decode(raw[2:]+'='*((4-len(raw[2:])%4)%4)).decode('utf-8','ignore')
                 except:pass
+            if not nxt:
+                m=re.search(r'https?://(?:www\.)?(?:hepsiburada|trendyol)\.com/[^\s&<>"\']+',raw,re.I)
+                if m:nxt=m.group(0)
         if not nxt: break
         u=nxt
-    return u
+    return htmlmod.unescape(unquote(u)).replace('\\/','/')
 
 def marketplace_url(site,raw,base=''):
     u=unwrap(raw); u=urljoin(base,u); p=urlparse(u); domain=SITES[site]
+    if domain not in p.netloc.lower():
+        # Arama motoru href'i içinde gizli/encode edilmiş gerçek URL varsa çıkar.
+        dec=htmlmod.unescape(unquote(u))
+        m=re.search(r'https?://(?:www\.)?'+re.escape(domain)+r'/[^\s&<>"\']+',dec,re.I)
+        if m: u=m.group(0); p=urlparse(u)
     if domain not in p.netloc.lower(): return None
-    if site=='Trendyol' and not re.search(r'-p-\d+(?:[/?#]|$)',p.path,re.I): return None
-    if site=='Hepsiburada' and not re.search(r'-p-[A-Za-z0-9]+(?:[/?#]|$)',p.path,re.I): return None
+    if site=='Trendyol' and not re.search(r'-p-\d+(?:[/?#&]|$)',p.path,re.I): return None
+    if site=='Hepsiburada' and not re.search(r'-p-[A-Za-z0-9]+(?:[/?#&]|$)',p.path,re.I): return None
     return f'https://www.{domain}{p.path.rstrip("/")}'
 
 def add(site,raw,title,text,out,seen):
@@ -66,6 +74,7 @@ def add(site,raw,title,text,out,seen):
 
 def extract_search(site,html,base):
     raw=htmlmod.unescape(html).replace('\\/','/').replace('\\u002F','/')
+    decoded=unquote(raw)
     soup=BeautifulSoup(raw,'html.parser'); out=[]; seen=set()
     blocks=soup.select('li.b_algo, div.MjjYud, div.g, div.yuRUbf, .result, .web-result, .algo, article')
     if not blocks: blocks=soup.find_all('a',href=True)
@@ -74,12 +83,18 @@ def extract_search(site,html,base):
         for a in block.find_all('a',href=True):
             add(site,a.get('href'),a.get_text(' ',strip=True) or text[:180],text,out,seen)
             if len(out)>=MAX_PRODUCTS:return out
-    # HTML içindeki çıplak/escape edilmiş ürün URL'leri de tara.
-    pats=[r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^"\'<>\s]+-p-[A-Za-z0-9]+',r'/(?:[^"\'<>\s]+)-p-[A-Za-z0-9]+']
-    for pat in pats:
-        for href in re.findall(pat,raw,re.I):
-            add(site,href,'Arama sonucu',raw,out,seen)
-            if len(out)>=MAX_PRODUCTS:return out
+    # Arama motorlarının sonuç URL'leri bazen HTML attribute'unda encoded tutuluyor.
+    pats=[
+        r'https?://(?:www\.)?'+re.escape(SITES[site])+r'/[^"\'<>\s]+-p-[A-Za-z0-9]+',
+        r'https?%3A%2F%2F(?:www\.)?'+re.escape(SITES[site].replace('.','%2E'))+r'%2F[^"\'<>\s]+-p-[A-Za-z0-9]+',
+        r'/(?:[^"\'<>\s]+)-p-[A-Za-z0-9]+'
+    ]
+    for source in (raw,decoded):
+        for pat in pats:
+            for href in re.findall(pat,source,re.I):
+                href=unquote(href)
+                add(site,href,'Arama sonucu',source,out,seen)
+                if len(out)>=MAX_PRODUCTS:return out
     return out
 
 def engine_search(site,term,engine):
@@ -99,7 +114,6 @@ def direct_search(site,term,browser):
         if not r or status>=400:return []
         page.wait_for_timeout(1800); html=page.content(); out=extract_search(site,html,url)
         if not out:
-            # JS ile üretilen sayfada tüm href'leri ayrıca oku.
             for a in page.locator('a[href]').all():
                 try:add(site,a.get_attribute('href'),a.inner_text(timeout=200),a.inner_text(timeout=200),out,seen)
                 except:pass
@@ -110,7 +124,7 @@ def direct_search(site,term,browser):
 
 def discover(site,browser):
     found=[];seen=set()
-    # Önce gerçek marketplace arama sayfası; arama motorları sadece yedek.
+    # Direkt sayfa 403 ise zaman kaybetmeden arama motorlarına geç.
     for term in TERMS:
         for item in direct_search(site,term,browser):
             if item[0] not in seen:seen.add(item[0]);found.append(item)
@@ -193,21 +207,20 @@ def process(p):
     try:
         now=datetime.now(timezone.utc).isoformat(); rows=sb('GET','products',params={'select':'*','product_url':f'eq.{p["url"]}','limit':'1'}); row=rows[0] if rows else None
         old=history(p['url']); previous_observed=old[0] if old else None
-        base=previous_observed
         payload={'product_name':p['title'],'current_price':p['current'],'previous_price':previous_observed,'product_url':p['url'],'site':p['site'],'updated_at':now}
         if row:sb('PATCH',f'products?id=eq.{row["id"]}',json=payload)
         else:row=(sb('POST','products',json=payload) or [payload])[0]
         sb('POST','price_history',json={'price':p['current'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
-        print(f'Kontrol: {p["site"]} | mevcut={p["current"]:.2f} | son gözlenen={base or 0:.2f} | geçmiş={len(old)}')
-        if not base or base<=p['current']:return False
-        disc=(base-p['current'])/base*100
+        print(f'Kontrol: {p["site"]} | mevcut={p["current"]:.2f} | son gözlenen={previous_observed or 0:.2f} | geçmiş={len(old)}')
+        if previous_observed is None or previous_observed<=p['current']:return False
+        disc=(previous_observed-p['current'])/previous_observed*100
         if disc<MIN_DISCOUNT:return False
         last=row.get('last_posted_at') if isinstance(row,dict) else None
         if last:
             try:
                 if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):return False
             except:pass
-        msg=f'🔥 %{disc:.0f} İNDİRİM\n\n{p["title"]}\n\n💰 {p["current"]:,.2f} TL\n🏷️ Önce: {base:,.2f} TL\n🛍️ {p["site"]}\n🔗 {p["url"]}'
+        msg=f'🔥 %{disc:.0f} İNDİRİM\n\n{p["title"]}\n\n💰 {p["current"]:,.2f} TL\n🏷️ Önce: {previous_observed:,.2f} TL\n🛍️ {p["site"]}\n🔗 {p["url"]}'
         r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':msg},timeout=10); print(f'Telegram {p["site"]}: {r.status_code}')
         if r.ok and isinstance(row,dict) and row.get('id'):sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':now,'last_posted_price':p['current']})
         return r.ok
@@ -216,14 +229,14 @@ def process(p):
 def main():
     print('=== HB/Trendyol V2 keşif başladı ==='); sent=0
     with sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox','--disable-blink-features=AutomationControlled'])
-        for site in SITES:
-            items=discover(site,browser); print(f'{site}: {len(items)} aday')
-            for url,title,search_prices in items:
-                data=product_page(site,url,title,search_prices,browser)
-                if data:
-                    data['site']=site
-                    if process(data):sent+=1
+        browser=p.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled','--no-sandbox'])
+        for site in ('Hepsiburada','Trendyol'):
+            found=discover(site,browser); print(f'{site}: {len(found)} aday')
+            for url,title,search_ps in found:
+                pinfo=product_page(site,url,title,search_ps,browser)
+                if pinfo:
+                    pinfo['site']=site
+                    if process(pinfo):sent+=1
         browser.close()
     print(f'=== V2 bitti. Gönderilen: {sent} ===')
 
