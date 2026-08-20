@@ -102,9 +102,7 @@ def _search_prices(query, domain=None):
         if r.status_code >= 400:
             return []
         soup = BeautifulSoup(r.text, 'html.parser')
-        text = soup.get_text(' ', strip=True)
         if domain:
-            # Keep only result blocks mentioning the requested domain when possible.
             vals = []
             for block in soup.select('div.MjjYud, div.g'):
                 b = block.get_text(' ', strip=True)
@@ -112,7 +110,7 @@ def _search_prices(query, domain=None):
                     vals.extend(bot.prices(b))
             if vals:
                 return sorted(set(vals))
-        return sorted(set(bot.prices(text)))
+        return sorted(set(bot.prices(soup.get_text(' ', strip=True))))
     except Exception:
         return []
 
@@ -125,11 +123,9 @@ def _amazon_search_prices(url, title):
         queries += [f'site:amazon.com.tr {asin} TL', f'"{asin}" Amazon Türkiye fiyat']
     if title:
         queries.append(f'site:amazon.com.tr "{title[:100]}" TL')
-
     for qtext in queries:
         found = _search_prices(qtext, 'amazon.com.tr')
         if found:
-            # Search pages may contain list + current price. Do not use a random minimum as a price.
             print(f'Amazon arama son çare fiyatları: {found[:12]}')
             return found[0], next((v for v in found if v > found[0] * 1.03), None)
     return None, None
@@ -181,7 +177,6 @@ def product_page(site, url, title, browser, search_ps=None):
                 cur = current[0]
                 previous = _amazon_previous_prices(page, html, cur)
                 prev = min(previous) if previous else None
-                # Akakçe, Amazon fiyatı bulunmuşsa yalnızca daha güçlü piyasa/geçmiş bazını destekler.
                 ak_prev = _akakce_market_reference(url, title, cur)
                 if ak_prev and (prev is None or ak_prev > prev):
                     prev = ak_prev
@@ -193,7 +188,7 @@ def product_page(site, url, title, browser, search_ps=None):
                 except Exception:
                     pass
                 print(f'{site} güvenilir fiyatlar: {[round(x, 2) for x in current[:8]]}')
-                print(f'{site} fiyat: {cur:.2f} | önceki/piyasa: {prev or 0:.2f}')
+                print(f'{site} fiyat: {cur:.2f} | sayfa referansı: {prev or 0:.2f}')
                 return {'name': _clean_name(name), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
 
         print(f'{site} DOM/HTML fiyatı bulunamadı; Amazon arama + Akakçe referansı deneniyor | {url}')
@@ -212,6 +207,81 @@ def product_page(site, url, title, browser, search_ps=None):
         page.close()
 
 
+def process_with_real_history(p):
+    """İndirim bazını Amazon'un liste fiyatından değil, botun gözlediği gerçek geçmişten al."""
+    try:
+        rows = bot.sb('GET', 'products', params={
+            'select': '*', 'product_url': f'eq.{p["url"]}', 'limit': '1'
+        })
+        now = bot.datetime.now(bot.timezone.utc).isoformat()
+
+        # Önceki gözlemler, yeni fiyat kaydedilmeden önce okunur.
+        old = bot.history(p['url'])
+        previous_observed = old[0] if old else None
+
+        # İlk kez görülen ürün için indirim üretme. Önce geçmiş oluşturalım.
+        if previous_observed is None:
+            print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | önceki gözlem yok -> paylaşılmadı')
+        else:
+            print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | son gözlenen={previous_observed:.2f} | geçmiş={len(old)}')
+
+        payload = {
+            'product_name': p['name'],
+            'current_price': p['price'],
+            # Telegram indirimi için kullanılacak baz yalnızca gözlenen geçmiş fiyatıdır.
+            'previous_price': previous_observed,
+            'product_url': p['url'],
+            'site': p['site'],
+            'updated_at': now,
+        }
+        if rows:
+            row = rows[0]
+            bot.sb('PATCH', f'products?id=eq.{row["id"]}', json=payload)
+        else:
+            row = (bot.sb('POST', 'products', json=payload) or [payload])[0]
+
+        # Yeni gözlemi ancak baz fiyatı belirledikten sonra kaydet.
+        bot.sb('POST', 'price_history', json={
+            'price': p['price'], 'product_url': p['url'], 'site': p['site'], 'recorded_at': now
+        })
+
+        if previous_observed is None or previous_observed <= p['price']:
+            return False
+
+        disc = (previous_observed - p['price']) / previous_observed * 100
+        if disc < bot.MIN_DISCOUNT:
+            return False
+
+        last = row.get('last_posted_at') if isinstance(row, dict) else None
+        if last:
+            try:
+                if bot.datetime.now(bot.timezone.utc) - bot.datetime.fromisoformat(last.replace('Z', '+00:00')) < bot.timedelta(hours=bot.COOLDOWN):
+                    return False
+            except Exception:
+                pass
+
+        msg = (
+            f'🔥 %{disc:.0f} İNDİRİM\n\n{p["name"]}\n\n'
+            f'💰 {p["price"]:,.2f} TL\n🏷️ Önce: {previous_observed:,.2f} TL\n'
+            f'🛍️ {p["site"]}\n🔗 {p["url"]}'
+        )
+        r = requests.post(
+            f'https://api.telegram.org/bot{bot.TOKEN}/sendMessage',
+            json={'chat_id': bot.CHANNEL_ID, 'text': msg}, timeout=8
+        )
+        print(f'Telegram gönderim HTTP: {r.status_code} | {r.text[:200]}')
+        if r.ok:
+            if isinstance(row, dict) and row.get('id'):
+                bot.sb('PATCH', f'products?id=eq.{row["id"]}', json={
+                    'last_posted_at': now, 'last_posted_price': p['price']
+                })
+            return True
+    except Exception as e:
+        print(f'işlem hata: {type(e).__name__}: {e}')
+    return False
+
+
 bot.product_page = product_page
+bot.process = process_with_real_history
 bot.SEEDS = {'Amazon': 'https://www.amazon.com.tr/gp/goldbox'}
 bot.main()
