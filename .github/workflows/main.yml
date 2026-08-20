@@ -43,6 +43,8 @@ jobs:
           print(f"Supabase cevap: {r.text[:500]}")
           r.raise_for_status()
           PY
+      - name: Telegram çıktı düzeltmeleri
+        run: python apply_telegram_runtime_patch.py
       - name: Telegram fırsat keşfi (Amazon + Hepsiburada + Trendyol)
         timeout-minutes: 8
         env:
