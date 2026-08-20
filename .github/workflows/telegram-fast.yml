@@ -47,14 +47,17 @@ jobs:
           cycle=0
           while [ "$SECONDS" -lt "$end" ]; do
             cycle=$((cycle + 1))
+            cycle_start=$SECONDS
             echo "=== Telegram tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
             sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
             timeout 240s python telegram_sources.py || echo "Telegram kaynak taraması bu turda hata verdi; sonraki tur devam edecek."
             timeout 90s python telegram_image_ocr_v2.py || echo "OCR bu turda hata verdi; sonraki tur devam edecek."
             remaining=$((end - SECONDS))
             if [ "$remaining" -le 0 ]; then break; fi
-            sleep_for=300
-            if [ "$remaining" -lt "$sleep_for" ]; then sleep_for="$remaining"; fi
-            echo "Sonraki Telegram taraması ${sleep_for} saniye sonra."
+            elapsed=$((SECONDS - cycle_start))
+            sleep_for=$((300 - elapsed))
+            if [ "$sleep_for" -lt 0 ]; then sleep_for=0; fi
+            if [ "$sleep_for" -gt "$remaining" ]; then sleep_for="$remaining"; fi
+            echo "Sonraki Telegram turu ${sleep_for} saniye sonra."
             sleep "$sleep_for"
           done
