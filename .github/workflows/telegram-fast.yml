@@ -13,7 +13,7 @@ concurrency:
 jobs:
   telegram:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     steps:
       - name: Kodu indir
         uses: actions/checkout@v5
@@ -25,6 +25,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Chromium kur
         run: python -m playwright install --with-deps chromium
+      - name: OCR motoru kur
+        run: sudo apt-get install -y tesseract-ocr tesseract-ocr-tur
       - name: Telegram kaynak ve görsel düzeltmeleri
         run: python apply_telegram_runtime_patch.py
       - name: Telegram fırsat keşfi
@@ -35,3 +37,11 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
         run: python telegram_sources.py
+      - name: Görsel kupon ve kod OCR taraması
+        timeout-minutes: 3
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+        run: python telegram_image_ocr_v2.py
