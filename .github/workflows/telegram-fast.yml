@@ -1,10 +1,13 @@
 name: Bahadir Telegram Kaynak Tarama
 
-# Telegram kaynakları hızlı katmandır: marketplace taramasından bağımsız çalışır.
+# Telegram katmanı tek seferlik cron işine bağlı kalmaz; runner açıkken
+# kendi içinde 5 dakikalık döngüyle taramayı sürdürür.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 */5 * * *"
 
 concurrency:
   group: bahadir-telegram-scanner
@@ -13,7 +16,7 @@ concurrency:
 jobs:
   telegram:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 350
     steps:
       - name: Kodu indir
         uses: actions/checkout@v5
@@ -31,21 +34,27 @@ jobs:
         run: python apply_priority_runtime_patch.py
       - name: Telegram kaynak ve görsel düzeltmeleri
         run: python apply_telegram_runtime_patch.py
-      - name: Telegram fırsat keşfi
-        timeout-minutes: 5
+      - name: Telegram 5 dakikalık sürekli tarama
+        timeout-minutes: 330
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
-          sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
-          python telegram_sources.py
-      - name: Görsel kupon ve kod OCR taraması
-        timeout-minutes: 2
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
-        run: python telegram_image_ocr_v2.py
+          set -u
+          end=$((SECONDS + 31500))
+          cycle=0
+          while [ "$SECONDS" -lt "$end" ]; do
+            cycle=$((cycle + 1))
+            echo "=== Telegram tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
+            timeout 240s python telegram_sources.py || echo "Telegram kaynak taraması bu turda hata verdi; sonraki tur devam edecek."
+            timeout 90s python telegram_image_ocr_v2.py || echo "OCR bu turda hata verdi; sonraki tur devam edecek."
+            remaining=$((end - SECONDS))
+            if [ "$remaining" -le 0 ]; then break; fi
+            sleep_for=300
+            if [ "$remaining" -lt "$sleep_for" ]; then sleep_for="$remaining"; fi
+            echo "Sonraki Telegram taraması ${sleep_for} saniye sonra."
+            sleep "$sleep_for"
+          done
