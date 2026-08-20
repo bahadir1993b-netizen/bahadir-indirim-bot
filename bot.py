@@ -58,27 +58,23 @@ def unwrap(u):
         u=unquote(found)
     return u
 
-def add_url(site,raw,base,out,seen,title='Ürün'):
+def add_url(site,raw,base,out,seen,title='Ürün',search_prices=None):
     if not raw:return
     u=canonical(urljoin(base,unwrap(str(raw))))
     if valid(site,u) and u not in seen:
-        seen.add(u);out.append((u,re.sub(r'\s+',' ',title or 'Ürün').strip()[:250]))
+        seen.add(u);out.append((u,re.sub(r'\s+',' ',title or 'Ürün').strip()[:250],search_prices))
 
 def candidates(site,html,base):
     html=html.replace('\\/','/').replace('\\u002F','/').replace('&amp;','&')
     soup=BeautifulSoup(html,'html.parser');out=[];seen=set()
     for a in soup.find_all('a',href=True):
-        add_url(site,a.get('href'),base,out,seen,a.get('title') or a.get('aria-label') or a.get_text(' ',strip=True))
+        add_url(site,a.get('href'),base,out,seen,a.get('title') or a.get('aria-label') or a.get_text(' ',strip=True),None)
         if len(out)>=MAX_PRODUCTS_PER_SITE:return out
-    # Also inspect plain text, including RSS <link> elements and JSON embedded URLs.
     raw_text=soup.get_text(' ',strip=True)
     blobs=[html,raw_text]
-    if site=='Amazon':
-        pats=[r'https?://(?:www\.)?amazon\.com\.tr/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}',r'/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}']
-    elif site=='Trendyol':
-        pats=[r'https?://(?:www\.)?trendyol\.com/[^"\'<>\\\s]+-p-\d+',r'(?:https?://)?(?:www\.)?trendyol\.com/[^"\'<>\\\s]+-p-\d+']
-    else:
-        pats=[r'https?://(?:www\.)?hepsiburada\.com/[^"\'<>\\\s]+-p-[A-Za-z0-9]+',r'(?:https?://)?(?:www\.)?hepsiburada\.com/[^"\'<>\\\s]+-p-[A-Za-z0-9]+']
+    if site=='Amazon':pats=[r'https?://(?:www\.)?amazon\.com\.tr/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}',r'/(?:dp|gp/product|gp/aw/d)/[A-Za-z0-9]{8,}']
+    elif site=='Trendyol':pats=[r'https?://(?:www\.)?trendyol\.com/[^"\'<>\\\s]+-p-\d+',r'(?:https?://)?(?:www\.)?trendyol\.com/[^"\'<>\\\s]+-p-\d+']
+    else:pats=[r'https?://(?:www\.)?hepsiburada\.com/[^"\'<>\\\s]+-p-[A-Za-z0-9]+',r'(?:https?://)?(?:www\.)?hepsiburada\.com/[^"\'<>\\\s]+-p-[A-Za-z0-9]+']
     for blob in blobs:
         for pat in pats:
             for m in re.findall(pat,blob,re.I):
@@ -86,34 +82,45 @@ def candidates(site,html,base):
                 if len(out)>=MAX_PRODUCTS_PER_SITE:return out
     return out
 
-def rss_candidates(site,term):
+def search_candidates(site,term):
     domain='hepsiburada.com' if site=='Hepsiburada' else 'trendyol.com'
-    q=quote(f'site:{domain} inurl:-p- {term}')
-    urls=[f'https://www.bing.com/search?format=rss&q={q}',f'https://html.duckduckgo.com/html/?q={q}']
+    q=quote(f'site:{domain} {term} TL')
+    engines=[
+        f'https://www.google.com/search?q={q}&num=10',
+        f'https://www.bing.com/search?q={q}&count=10',
+        f'https://html.duckduckgo.com/html/?q={q}'
+    ]
     out=[];seen=set()
-    for u in urls:
+    for u in engines:
         try:
-            r=requests.get(u,headers=HEADERS,timeout=10)
+            r=requests.get(u,headers=HEADERS,timeout=12)
             print(f'{site} arama {urlparse(u).netloc} [{term}] HTTP: {r.status_code}')
-            if not r.ok:continue
-            # Bing RSS puts result URLs inside <link> text, not href attributes.
-            soup=BeautifulSoup(r.text,'xml' if 'format=rss' in u else 'html.parser')
-            for item in soup.find_all('item'):
-                link=item.find('link');title=item.find('title')
-                if link and link.get_text(strip=True):add_url(site,link.get_text(strip=True),u,out,seen,title.get_text(' ',strip=True) if title else 'Ürün')
-            # Normal HTML engines still need anchor/embedded-URL parsing.
-            for x in candidates(site,r.text,u):
-                if x[0] not in seen:seen.add(x[0]);out.append(x)
+            if r.status_code>=400:continue
+            soup=BeautifulSoup(r.text,'html.parser')
+            # Search-result blocks preserve both the product URL and visible price text.
+            blocks=soup.select('div.MjjYud, li.b_algo, .result, .web-result')
+            if not blocks:blocks=soup.find_all('a',href=True)
+            for block in blocks:
+                text=re.sub(r'\s+',' ',block.get_text(' ',strip=True))
+                ps=prices(text)
+                for a in block.find_all('a',href=True) if hasattr(block,'find_all') else []:
+                    raw=a.get('href'); title=a.get_text(' ',strip=True) or text[:180]
+                    before=len(out);add_url(site,raw,u,out,seen,title,ps)
+                    if len(out)>before and len(out)>=MAX_PRODUCTS_PER_SITE:return out[:MAX_PRODUCTS_PER_SITE]
+            # Also scan the complete response for embedded product URLs.
+            for item in candidates(site,r.text,u):
+                if item[0] not in seen:
+                    seen.add(item[0]);out.append(item)
+                    if len(out)>=MAX_PRODUCTS_PER_SITE:return out[:MAX_PRODUCTS_PER_SITE]
             print(f'{site} arama [{term}] bu kaynaktan aday: {len(out)}')
-            if len(out)>=MAX_PRODUCTS_PER_SITE:return out[:MAX_PRODUCTS_PER_SITE]
         except Exception as e:print(f'{site} arama hata: {type(e).__name__}: {e}')
     return out
 
 def search_fallback(site):
-    terms=['indirim','çok satan','elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam']
+    terms=['indirim','kampanya','çok satan','elektronik','telefon','laptop','kulaklık','televizyon','oyuncu','ev yaşam']
     allout=[];seen=set()
     for term in terms:
-        got=rss_candidates(site,term)
+        got=search_candidates(site,term)
         for x in got:
             if x[0] not in seen:seen.add(x[0]);allout.append(x)
         print(f'{site} arama [{term}] toplam aday: {len(allout)}')
@@ -138,8 +145,7 @@ def jsonld_all(html):
                 if not isinstance(o,dict):continue
                 typ=o.get('@type');types=typ if isinstance(typ,list) else [typ]
                 if 'Product' in types:
-                    name=name or o.get('name');off=o.get('offers') or {}
-                    offs=off if isinstance(off,list) else [off]
+                    name=name or o.get('name');off=o.get('offers') or {};offs=off if isinstance(off,list) else [off]
                     for z in offs:
                         if isinstance(z,dict):
                             for k in ('price','lowPrice','highPrice'):
@@ -148,11 +154,18 @@ def jsonld_all(html):
         except:pass
     return name,vals
 
-def product_page(site,url,title,browser):
+def product_page(site,url,title,browser,search_ps=None):
     page=browser.new_page();page.set_default_timeout(4500);page.set_default_navigation_timeout(15000)
     try:
         r=page.goto(url,wait_until='domcontentloaded');status=r.status if r else 0;print(f'{site} ürün HTTP: {status} | {url}')
-        if not r or status>=400:return None
+        if not r or status>=400:
+            if search_ps:
+                ps=sorted(set(search_ps))
+                cur=ps[0] if ps else None;prev=next((v for v in ps if v>cur*1.03),None) if cur else None
+                if cur:
+                    print(f'{site} arama fiyatı kullanılıyor: {ps[:8]}')
+                    return {'name':re.sub(r'\s+',' ',title or 'Ürün').strip()[:300],'price':cur,'previous':prev,'url':canonical(url),'site':site}
+            return None
         page.wait_for_timeout(1500);html=page.content();text=page.locator('body').inner_text(timeout=4500)
         jd_name,jd_prices=jsonld_all(html);vals=list(jd_prices)
         selectors=['.a-price .a-offscreen','#corePrice_feature_div .a-offscreen','.apexPriceToPay .a-offscreen','.a-text-price .a-offscreen','.priceBlockStrikePriceString','.basisPrice .a-offscreen','meta[property="product:price:amount"]','meta[itemprop="price"]','[data-test-id*="price"]','[class*="price"]']
@@ -166,14 +179,11 @@ def product_page(site,url,title,browser):
             except:pass
         vals.extend(prices(text));vals=sorted(set(v for v in vals if 1<v<10000000))
         if not vals:
-            print(f'{site} fiyat bulunamadı | title={title[:100]} | body={text[:300].replace(chr(10)," ")}')
-            return None
-        cur=vals[0];prev=next((v for v in vals if v>cur*1.03),None)
-        name=jd_name or title or 'Ürün'
+            print(f'{site} fiyat bulunamadı | title={title[:100]} | body={text[:300].replace(chr(10)," ")}');return None
+        cur=vals[0];prev=next((v for v in vals if v>cur*1.03),None);name=jd_name or title or 'Ürün'
         try:name=page.locator('meta[property="og:title"]').get_attribute('content') or name
         except:pass
-        print(f'{site} fiyat adayları: {[round(x,2) for x in vals[:12]]}')
-        print(f'{site} fiyat: {cur:.2f} | önceki: {prev or 0:.2f}')
+        print(f'{site} fiyat adayları: {[round(x,2) for x in vals[:12]]}');print(f'{site} fiyat: {cur:.2f} | önceki: {prev or 0:.2f}')
         return {'name':re.sub(r'\s+',' ',name).strip()[:300],'price':cur,'previous':prev,'url':canonical(url),'site':site}
     except Exception as e:print(f'{site} ürün hata: {type(e).__name__}: {e}');return None
     finally:page.close()
@@ -186,13 +196,12 @@ def history(url):
 
 def process(p):
     try:
-        rows=sb('GET','products',params={'select':'*','product_url':f'eq.{p["url"]}','limit':'1'})
-        now=datetime.now(timezone.utc).isoformat();payload={'product_name':p['name'],'current_price':p['price'],'previous_price':p.get('previous'),'product_url':p['url'],'site':p['site'],'updated_at':now}
+        rows=sb('GET','products',params={'select':'*','product_url':f'eq.{p["url"]}','limit':'1'});now=datetime.now(timezone.utc).isoformat()
+        payload={'product_name':p['name'],'current_price':p['price'],'previous_price':p.get('previous'),'product_url':p['url'],'site':p['site'],'updated_at':now}
         if rows:row=rows[0];sb('PATCH',f'products?id=eq.{row["id"]}',json=payload)
         else:row=(sb('POST','products',json=payload) or [payload])[0]
         old=history(p['url']);sb('POST','price_history',json={'price':p['price'],'product_url':p['url'],'site':p['site'],'recorded_at':now})
-        base=p.get('previous') or (max(old) if old else None)
-        print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | baz={base or 0:.2f} | geçmiş={len(old)}')
+        base=p.get('previous') or (max(old) if old else None);print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | baz={base or 0:.2f} | geçmiş={len(old)}')
         if not base or base<=p['price']:return False
         disc=(base-p['price'])/base*100
         if disc<MIN_DISCOUNT:return False
@@ -202,8 +211,7 @@ def process(p):
                 if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):return False
             except:pass
         msg=f'🔥 %{disc:.0f} İNDİRİM\n\n{p["name"]}\n\n💰 {p["price"]:,.2f} TL\n🏷️ Önce: {base:,.2f} TL\n🛍️ {p["site"]}\n🔗 {p["url"]}'
-        r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':msg},timeout=8)
-        print(f'Telegram gönderim HTTP: {r.status_code} | {r.text[:200]}')
+        r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':msg},timeout=8);print(f'Telegram gönderim HTTP: {r.status_code} | {r.text[:200]}')
         if r.ok:
             if isinstance(row,dict) and row.get('id'):sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':now,'last_posted_price':p['price']})
             return True
@@ -218,8 +226,9 @@ def main():
             print(f'--- {site} keşif ---');links=discover(site,seed,browser)
             if not links and site!='Amazon':links=search_fallback(site)
             found=0
-            for url,title in links[:MAX_PRODUCTS_PER_SITE]:
-                p=product_page(site,url,title,browser)
+            for item in links[:MAX_PRODUCTS_PER_SITE]:
+                url,title,search_ps=(item if len(item)==3 else (*item,None))
+                p=product_page(site,url,title,browser,search_ps)
                 if p:found+=1;sent+=1 if process(p) else 0
             print(f'{site}: {found} fiyatlı ürün')
         browser.close()
