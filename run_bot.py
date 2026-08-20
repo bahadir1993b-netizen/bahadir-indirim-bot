@@ -30,7 +30,6 @@ def _amazon_price_values(page, html):
         except Exception:
             pass
 
-    # Amazon bazen fiyatı DOM yerine JS JSON'u içinde taşır.
     raw_patterns = [
         r'"priceToPay"\s*:\s*\{[^{}]{0,500}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
         r'"priceAmount"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
@@ -53,7 +52,6 @@ def _amazon_price_values(page, html):
     except Exception:
         pass
 
-    # Whole + fraction birlikte. Fraction tek başına asla fiyat değildir.
     if not values:
         try:
             whole_loc = page.locator('.a-price-whole')
@@ -104,7 +102,6 @@ def _amazon_previous_prices(page, html, current):
 
 
 def _amazon_search_prices(url, title):
-    """DOM fiyatı yoksa Amazon ASIN'i üzerinden arama sonucunu son çare kullan."""
     m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
     asin = m.group(1) if m else None
     queries = [f'site:amazon.com.tr {asin} TL'] if asin else []
@@ -170,7 +167,6 @@ def product_page(site, url, title, browser, search_ps=None):
             print(f'{site} güvenilir tam fiyat bulunamadı | {url}')
             return None
 
-        # Güvenilir tam fiyat alanlarında ilk değer güncel fiyat kabul edilir.
         cur = current[0]
         previous = _amazon_previous_prices(page, html, cur)
         prev = min(previous) if previous else None
@@ -192,4 +188,6 @@ def product_page(site, url, title, browser, search_ps=None):
 
 
 bot.product_page = product_page
+# run_bot.py yalnızca Amazon'u çalıştırır. HB/Trendyol ayrı marketplaces.py ile çalışır.
+bot.SEEDS = {'Amazon':'https://www.amazon.com.tr/gp/goldbox'}
 bot.main()
