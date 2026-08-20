@@ -28,16 +28,14 @@ new_verify=r'''def verify(page,site,u,fallback_title,expected_current,expected_p
    if not current_vals: current_vals=prices(soup.get_text(' ',strip=True))[:50]
   if not current_vals:return None
   current=min(current_vals,key=lambda x:abs(x-expected_current)) if expected_current else current_vals[0]
-  if expected_current and abs(current-expected_current)/max(expected_current,1)>0.35:
-   print(f'PRICE MISMATCH | {site} | beklenen={expected_current:.2f} | sayfa={current:.2f} | ATLANDI'); return None
-  # Supabase gerçek fiyat geçmişi: eski fiyatın kaynağı öncelikle gözlenmiş gerçek fiyatlar.
+  if expected_current and abs(current-expected_current)/max(expected_current,1)>0.08:
+   print(f'PRICE FRESHNESS MISMATCH | {site} | beklenen={expected_current:.2f} | sayfa={current:.2f} | ATLANDI'); return None
   previous=None
   try:
    rows=sb('GET','price_history',params={'select':'price,recorded_at','product_url':f'eq.{u}','site':f'eq.{site}','order':'recorded_at.desc','limit':'60'})
    hist=sorted([float(r['price']) for r in rows if r.get('price') is not None and float(r['price'])>current])
    if hist: previous=hist[0]
   except Exception as e: print('HISTORY HATA',site,e)
-  # Geçmiş yoksa yalnızca açıkça işaretlenmiş old/list fiyatını kabul et.
   if not previous:
    old=[]
    for sel in ['del','s','.old-price','.list-price','.price-old','[class*="oldPrice"]','[class*="old-price"]','[class*="listPrice"]','[data-a-strike="true"]','[aria-label*="eski"]','[aria-label*="liste"]','.a-text-price .a-offscreen','#basisPrice_feature_div .a-offscreen','#corePriceDisplay_desktop_feature_div .a-text-price .a-offscreen','#corePrice_feature_div .a-text-price .a-offscreen']:
@@ -51,37 +49,40 @@ new_verify=r'''def verify(page,site,u,fallback_title,expected_current,expected_p
      if x and x>current: old.append(x)
    if old: previous=min(old)
   if not previous or previous<=current:
-   # İlk gözlem: fiyatı kaydet, sahte indirim üretme.
    try: sb('POST','price_history',json={'price':current,'product_url':u,'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
    except: pass
    print(f'VERIFY ESKİ FİYAT YOK | {site} | mevcut={current:.2f} | ilk gözlem/ATLANDI'); return None
   ratio=previous/current
   if ratio>4.0:
-   print(f'VERIFY ESKİ FİYAT ŞÜPHELİ | {site} | mevcut={current:.2f} | önceki={previous:.2f} | oran={ratio:.1f}x | ATLANDI')
-   return None
-  # Amazon için Akakçe: yalnızca ürün/model eşleşen arama sonuçlarını dikkate al.
+   print(f'VERIFY ESKİ FİYAT ŞÜPHELİ | {site} | mevcut={current:.2f} | önceki={previous:.2f} | oran={ratio:.1f}x | ATLANDI'); return None
   if site=='Amazon':
    try:
     model=re.findall(r'\b[A-Z]{1,6}\d{2,}[A-Z0-9-]*\b',title.upper())
     queries=[]
     if model: queries.append(' '.join(model[:2]))
     words=[w for w in re.findall(r'[A-Za-zÇĞİÖŞÜçğıöşü0-9]+',title) if len(w)>2]
-    queries += [' '.join(words[:10]),' '.join(words[:6])]
+    queries += [' '.join(words[:24]),' '.join(words[:14]),' '.join(words[:8])]
     ak_min=None
     for q in queries:
+     if not q: continue
      r=requests.get('https://www.akakce.com/arama/?q='+requests.utils.quote(q),headers=HEAD,timeout=6)
      if not r.ok: continue
      ak=BeautifulSoup(r.text,'html.parser')
-     for card in ak.select('li.pt_v8, .p-item, .m_i, .product'): 
+     for card in ak.select('li.pt_v8, .p-item, .m_i, .product'):
       ct=card.get_text(' ',strip=True); score=len(toks(title)&toks(ct))/max(1,len(toks(title)))
       if model and not any(m in ct.upper() for m in model): continue
       if score<0.20: continue
       for el in card.select('.price,.fiyat,[class*="price"]'):
-       x=money(el.get_text(' ',strip=True));
+       x=money(el.get_text(' ',strip=True))
        if x and x>1: ak_min=x if ak_min is None else min(ak_min,x)
-    if ak_min and ak_min<current*0.85:
-     print(f'AKAKCE DAHA UCUZ | Amazon={current:.2f} | Akakçe={ak_min:.2f} | ATLANDI'); return None
-   except Exception as e: print('AKAKCE KONTROL HATA',e)
+    if ak_min:
+     market_disc=(ak_min-current)/ak_min*100 if ak_min>current else 0
+     if market_disc < MIN_DISCOUNT:
+      print(f'AKAKCE PIYASA AVANTAJI YETERSİZ | Amazon={current:.2f} | Akakçe={ak_min:.2f} | %{market_disc:.1f} | ATLANDI'); return None
+     p_market=ak_min
+     if p_market>current:
+      previous=p_market
+      print(f'AKAKCE REFERANS | mevcut={current:.2f} | piyasa={p_market:.2f} | gerçek indirim=%{market_disc:.1f}')
   disc=(previous-current)/previous*100
   if disc<MIN_DISCOUNT:return None
   try: sb('POST','price_history',json={'price':current,'product_url':u,'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
@@ -91,4 +92,4 @@ new_verify=r'''def verify(page,site,u,fallback_title,expected_current,expected_p
 '''
 s2,n=re.subn(r'def verify\(page,site,u,fallback_title,expected_current,expected_previous\):.*?(?=\ndef send\()',lambda m:new_verify.rstrip()+'\n',s,count=1,flags=re.S)
 if n!=1: raise SystemExit('verify fonksiyonu bulunamadı')
-P.write_text(s2,encoding='utf-8'); print('Marketplace doğrulama güncellendi: gerçek geçmiş + ürün eşleşmesi + Akakçe model kontrolü')
+P.write_text(s2,encoding='utf-8'); print('Marketplace doğrulama güncellendi: canlı fiyat + sıkı Akakçe piyasa avantajı + gerçek geçmiş')
