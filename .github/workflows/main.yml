@@ -4,13 +4,23 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    # Every 5 minutes, offset from the exact hour to reduce GitHub scheduler congestion.
+    - cron: "2-59/5 * * * *"
+
+concurrency:
+  group: bahadir-indirim-bot
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Otomatik çalışma kontrolü
+        run: |
+          echo "Bot çalışma zamanı: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Tetikleyici: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
       - name: Kodu indir
         uses: actions/checkout@v5
       - name: Python kur
