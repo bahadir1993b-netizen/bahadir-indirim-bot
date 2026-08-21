@@ -8,7 +8,7 @@ if bot.SUPABASE_URL.endswith('/rest/v1'):
     bot.SUPABASE_URL = bot.SUPABASE_URL[:-8].rstrip('/')
 
 SERPER_API_KEY=os.environ['SERPER_API_KEY']
-AMAZON_TAG=os.environ.get('AMAZON_TAG','').strip()
+AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
 QUERIES=['elektronik indirim','ev yaşam indirim','telefon laptop kulaklık indirim','oyuncu televizyon küçük ev aletleri indirim']
 TARGETS={
     'amazon.com.tr':'Amazon','www.amazon.com.tr':'Amazon',
@@ -55,6 +55,21 @@ def parse_price(v):
     try:
         x=float(s);return x if 1<x<10000000 else None
     except:return None
+
+def item_reference_price(item,current):
+    """Serper sonucunda varsa çizili/liste/eski fiyatı güvenli biçimde bul."""
+    vals=[]
+    likely_keys={'oldprice','originalprice','listprice','beforeprice','wasprice','regularprice','baseprice'}
+    def walk(x,key=''):
+        if isinstance(x,dict):
+            for k,v in x.items():walk(v,str(k).lower())
+        elif isinstance(x,list):
+            for v in x:walk(v,key)
+        elif key in likely_keys or any(z in key for z in ('oldprice','originalprice','listprice','beforeprice','wasprice','regularprice')):
+            p=parse_price(x)
+            if p and p>current*1.03 and p<=current*5:vals.append(p)
+    walk(item)
+    return max(vals) if vals else None
 
 def canonical_for_db(link):
     p=urlparse(link)
@@ -159,14 +174,17 @@ def process_item(item):
     now=datetime.now(timezone.utc).isoformat()
     try:
         rows=bot.sb('GET','products',params={'select':'*','product_url':f'eq.{db_url}','limit':'1'})
-        old=bot.history(db_url);prev=old[0] if old else None
+        old=bot.history(db_url)
+        hist_ref=max((x for x in old if x>current*1.03),default=None)
+        source_ref=item_reference_price(item,current)
+        prev=max([x for x in (hist_ref,source_ref) if x],default=None)
         payload={'product_name':title,'current_price':current,'previous_price':prev,'product_url':db_url,'site':site,'updated_at':now}
         if rows:
             row=rows[0];bot.sb('PATCH',f'products?id=eq.{row["id"]}',json=payload)
         else:
             row=(bot.sb('POST','products',json=payload) or [payload])[0]
         bot.sb('POST','price_history',json={'price':current,'product_url':db_url,'site':site,'recorded_at':now})
-        print(f'Kontrol: {site} | {current:.2f} TL | önceki={prev or 0:.2f} | {title[:70]}')
+        print(f'Kontrol: {site} | {current:.2f} TL | referans={prev or 0:.2f} | geçmiş={len(old)} | {title[:65]}')
         if prev is None or prev<=current:return False
         disc=(prev-current)/prev*100
         if disc<bot.MIN_DISCOUNT:return False
@@ -177,7 +195,7 @@ def process_item(item):
                 if datetime.now(timezone.utc)-dt < bot.timedelta(hours=bot.COOLDOWN):return False
             except:pass
         link=clean_link(direct_link,site)
-        msg=f'🔥 %{disc:.0f} İNDİRİM\n\n{title}\n\n💰 {current:,.2f} TL\n🏷️ Önce: {prev:,.2f} TL\n🛍️ {site}\n🔗 {link}'
+        msg=f'🔥 %{disc:.0f} İNDİRİM\n\n{title}\n\n💰 {current:,.2f} TL\n🏷️ Referans: {prev:,.2f} TL\n🛍️ {site}\n🔗 {link}'
         if image:
             rr=requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendPhoto',data={'chat_id':bot.CHANNEL_ID,'photo':image,'caption':msg[:1024]},timeout=12)
             if not rr.ok:rr=requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendMessage',json={'chat_id':bot.CHANNEL_ID,'text':msg},timeout=10)
@@ -190,6 +208,8 @@ def process_item(item):
         print(f'İşlem hata: {type(e).__name__}: {e}');return False
 
 def main():
+    global _resolve_count
+    _resolve_count=0
     print('=== Serper alışveriş botu başladı ===')
     seen=set();matched=0;sent=0
     for q in QUERIES:
