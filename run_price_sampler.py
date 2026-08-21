@@ -1,4 +1,4 @@
-import os,time,statistics
+import os,time,statistics,re
 from datetime import datetime,timezone
 from playwright.sync_api import sync_playwright
 import local_store as ls
@@ -11,9 +11,30 @@ DEAL_PCT=max(5.0,float(os.environ.get('PRICE_SAMPLE_DEAL_PCT','15')))
 BROWSER_LIMIT=max(0,int(os.environ.get('PRICE_SAMPLE_BROWSER_LIMIT','80')))
 CURSOR_KEY='price-sampler-index'
 
+BAD_TITLE_PARTS=('ürün özeti','temel ürün bilgilerini','klavye kısayolu','shift + alt','amazon.com.tr','bu sayfada ara','tam görünümü görmek için','javascript:void','müşteri yorumları')
+
 def num(x):
     try:return float(x)
     except:return None
+
+def clean_title(s):
+    s=re.sub(r'\s+',' ',str(s or '')).strip(' -|')
+    return s[:300]
+
+def good_title(s):
+    s=clean_title(s);low=s.lower()
+    if len(s)<8 or any(x in low for x in BAD_TITLE_PARTS):return False
+    # gerçek ürün başlıklarında genellikle en az iki anlamlı kelime vardır
+    toks=re.findall(r'[A-Za-zÇĞİÖŞÜçğıöşü0-9]{2,}',s)
+    return len(toks)>=2
+
+def choose_title(page_title,catalog_title):
+    p=clean_title(page_title);c=clean_title(catalog_title)
+    if good_title(p):
+        # çok kısa/generic sayfa başlığı yerine elimizdeki daha ayrıntılı katalog adını koru
+        if good_title(c) and len(p)<18 and len(c)>len(p)*1.8:return c
+        return p
+    return c if good_title(c) else 'Ürün'
 
 def baseline(title,current):
     rows=ar.history_by_title(title,days=180,limit=250)
@@ -39,8 +60,8 @@ def main():
     picked=[];n=len(products)
     for i in range(min(LIMIT,n)):picked.append(products[(start+i)%n])
     next_idx=(start+len(picked))%n
-    ok=fail=normal=deal=changed=browser_used=0
-    print(f'=== SÜREKLİ FİYAT ÖRNEKLEME V2 | katalog={n} | tur={len(picked)} | browser_limit={BROWSER_LIMIT} | başlangıç={start} ===')
+    ok=fail=normal=deal=changed=browser_used=bad_titles=0
+    print(f'=== SÜREKLİ FİYAT ÖRNEKLEME V3 | katalog={n} | tur={len(picked)} | browser_limit={BROWSER_LIMIT} | başlangıç={start} ===')
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled']) if BROWSER_LIMIT else None
         page=browser.new_page() if browser else None
@@ -56,14 +77,15 @@ def main():
                 except Exception:pass
             if not info or not info.get('live'):
                 fail+=1;time.sleep(SLEEP);continue
-            p=float(info['live']);old=num(info.get('old'));base=baseline(title,p)
+            p=float(info['live']);old=num(info.get('old'));final_title=choose_title(info.get('title'),title)
+            if not good_title(info.get('title')):bad_titles+=1
+            base=baseline(final_title,p)
             kind='market-normal'
             if base and base>p and (base-p)/base*100>=DEAL_PCT:
                 kind='market-deal';deal+=1
             else:normal+=1
             prev=num(row.get('last_price'))
             if prev and abs(prev-p)/max(p,1)>=0.005:changed+=1
-            final_title=info.get('title') or title
             ls.upsert_product(url,site,final_title,p,old,'price-sampler','',info.get('image') or '')
             ls.add_price(url,site,p,old,'price-sampler','')
             ar.add(final_title,p,site,old,'PriceSampler',kind,url,datetime.now(timezone.utc).isoformat())
@@ -72,6 +94,6 @@ def main():
             time.sleep(SLEEP)
         if browser:browser.close()
     ar.cursor_set(CURSOR_KEY,next_idx)
-    print(f'=== ÖRNEKLEME BİTTİ | başarılı={ok} | fiyat_yok={fail} | normal={normal} | fırsat={deal} | değişen={changed} | browser={browser_used} | sonraki={next_idx} | arsiv={ar.stats()} ===')
+    print(f'=== ÖRNEKLEME BİTTİ | başarılı={ok} | fiyat_yok={fail} | normal={normal} | fırsat={deal} | değişen={changed} | browser={browser_used} | kirli_başlık_engel={bad_titles} | sonraki={next_idx} | arsiv={ar.stats()} ===')
 
 if __name__=='__main__':main()
