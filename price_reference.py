@@ -49,11 +49,13 @@ def _save():
 def _robust_prices(vals):
     vals=sorted(set(round(float(v),2) for v in vals if v and v>1))
     if len(vals)<2:return []
-    # Build a realistic lower-price cluster. Marketplace feeds occasionally contain
-    # absurd variant/seller prices (e.g. 549 TL mixed with 584,995 TL).
     floor=vals[0]
-    near=[p for p in vals if p<=floor*2.5]
-    if len(near)>=2:vals=near
+    # A normal reference must live in the same order-of-magnitude cluster as the
+    # cheapest exact match. Huge seller/variant prices are never allowed to define
+    # the market reference.
+    close=[p for p in vals if p<=floor*2.2]
+    if len(close)<2:return []
+    vals=close
     if len(vals)>=4:
         logs=sorted(math.log(p) for p in vals)
         q1=statistics.median(logs[:len(logs)//2])
@@ -62,11 +64,16 @@ def _robust_prices(vals):
         lo,hi=q1-1.5*iqr,q3+1.5*iqr
         trimmed=[p for p in vals if lo<=math.log(p)<=hi]
         if len(trimmed)>=2:vals=trimmed
+    # Last guard: even after trimming, the typical price may not be wildly above
+    # the lowest exact offer.
+    floor=min(vals);med=float(statistics.median(vals))
+    if med>floor*1.8:return []
     return vals
 
 def market_snapshot(title):
     if not SERPER_API_KEY or not title:return None,None,0,'none'
-    k='snap3:'+_key(title);x=CACHE.get(k)
+    # snap4 invalidates earlier cached medians that may contain bad variant prices.
+    k='snap4:'+_key(title);x=CACHE.get(k)
     if isinstance(x,dict) and time.time()-float(x.get('ts') or 0)<7200:
         return _price(x.get('floor')),_price(x.get('median')),int(x.get('n') or 0),'cache'
     try:
@@ -81,20 +88,15 @@ def market_snapshot(title):
             if p:vals.append(p)
         clean=_robust_prices(vals)
         if len(clean)<2:
-            CACHE[k]={'ts':time.time(),'floor':None,'median':None,'n':len(clean)};_save();return None,None,len(clean),'insufficient-exact-matches'
+            CACHE[k]={'ts':time.time(),'floor':None,'median':None,'n':len(clean)};_save();return None,None,len(clean),'insufficient-stable-matches'
         floor=min(clean);med=float(statistics.median(clean));n=len(clean)
-        # Final sanity bound. A reference several times the cheapest exact match is
-        # not useful as a normal market price.
-        if med>floor*2.2:
-            close=[p for p in clean if p<=floor*2.2]
-            if len(close)>=2:clean=close;floor=min(clean);med=float(statistics.median(clean));n=len(clean)
-            else:
-                CACHE[k]={'ts':time.time(),'floor':None,'median':None,'n':n};_save();return None,None,n,'unstable-market'
         CACHE[k]={'ts':time.time(),'floor':floor,'median':med,'n':n};_save()
-        return floor,med,n,'serper-market-robust'
+        return floor,med,n,'serper-market-robust-v4'
     except Exception as e:return None,None,0,f'error-{type(e).__name__}'
 
 def market_reference(site,title,current):
     floor,med,n,src=market_snapshot(title)
-    if med and current and med>current*1.08:return med,src
+    # Current-market median is context/corroboration, not historical proof by itself.
+    # Keep this helper conservative: require at least 3 stable matches.
+    if n>=3 and med and current and med>current*1.08:return med,src
     return None,src
