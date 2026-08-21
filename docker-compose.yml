@@ -1,0 +1,11 @@
+services:
+  indirim-bot:
+    build: .
+    container_name: bahadir-indirim-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SCAN_INTERVAL: ${SCAN_INTERVAL:-300}
+    command: >-
+      sh -c 'while true; do python run_bot.py; code=$$?; echo "Bot turu bitti (kod=$$code). ${SCAN_INTERVAL:-300} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-300}; done'
