@@ -10,7 +10,10 @@ services:
       DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-70}
       DIRECT_HISTORY_DAYS: ${DIRECT_HISTORY_DAYS:-90}
       DIRECT_HISTORY_WRITE_HOURS: ${DIRECT_HISTORY_WRITE_HOURS:-6}
+      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-25}
+      DIRECT_COOLDOWN_HOURS: ${DIRECT_COOLDOWN_HOURS:-12}
       SERPER_DISABLED: "1"
+      SERPER_API_KEY: ""
     volumes:
       - ./data:/app/data
     command: >-
@@ -26,6 +29,7 @@ services:
       TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-60}
       TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-180}
       SERPER_DISABLED: "1"
+      SERPER_API_KEY: ""
     command: >-
       sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
 
