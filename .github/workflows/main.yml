@@ -81,9 +81,9 @@ jobs:
             cycle_start=$SECONDS
             echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
-            # Hepsiburada + Trendyol: daha geniş arama, gerçek eski fiyat ve canlı fiyat doğrulaması.
+            # Hepsiburada + Trendyol: geniş aday havuzu; indirim son olarak ürün sayfasında doğrulanır.
             python apply_nonamazon_quality_patch.py
-            python apply_historical_reference_guard.py
+            python apply_nonamazon_discovery_patch.py
             timeout 240s python marketplace_nonamazon_scanner.py || echo "Hepsiburada/Trendyol taraması bu turda hata verdi; Amazon taramasına geçiliyor."
 
             # Amazon motoru: yalnız Amazon çalışır; canlı ödeme fiyatı son kapıdır.
