@@ -20,6 +20,6 @@ services:
       - .env
     environment:
       TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-60}
-      TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-10}
+      TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-180}
     command: >-
       sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
