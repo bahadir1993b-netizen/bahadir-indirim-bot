@@ -15,6 +15,7 @@ from deal_validation import inspect_page,choose_reference
 ts.MIN_DISCOUNT=float(os.environ.get('MIN_DISCOUNT','15'))
 ts.MAX_AGE=max(30,int(os.environ.get('TELEGRAM_MAX_AGE','180')))
 ts.AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
+API_FREE=str(os.environ.get('SERPER_DISABLED','0')).strip().lower() in {'1','true','yes','on'}
 
 def clean_title(raw):
     text=(raw or '').replace('\r','\n')
@@ -59,6 +60,18 @@ def source_photo(source,post_id,product_url=None,page_image=None):
 
 def fmt(x):return f'{x:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
 
+def own_history(url,current):
+    try:
+        since=(datetime.now(timezone.utc)-timedelta(days=90)).isoformat()
+        rows=ts.sb('GET','price_history',params={'select':'price,recorded_at','product_url':f'eq.{url}','recorded_at':f'gte.{since}','order':'recorded_at.desc','limit':'100'})
+        vals=[]
+        for x in rows:
+            try:p=float(x.get('price'))
+            except:p=0
+            if p and current*.75<=p<=current*1.55:vals.append(p)
+        return vals
+    except Exception:return []
+
 def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None,campaign=None,page_image=None,ref_source=''):
     if not ts.valid(s,u):print(f'ATLANDI | {source}:{post_id} | geçersiz link');return False
     key=f'{source}:{post_id}'
@@ -102,29 +115,31 @@ def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
     if pg.get('available') is False:
         print(f'ATLANDI | {source}:{post_id} | stokta yok');ts.remember(key);return False
     if pg.get('title') and len(pg['title'])>len(t)*0.8:t=clean_title(pg['title'])
-    campaign=pg.get('campaign')
-    live=pg.get('live')
-    # A source may publish an effective campaign unit price. Keep it only when the page campaign mathematically explains it.
+    campaign=pg.get('campaign');live=pg.get('live')
+    # Cheap direct HTML fallback; no search API is used.
+    if not live:
+        try:
+            pc,po=ts.marketplace_price_check(s,u,c)
+            if pc:live=pc
+            if po and not pg.get('old'):pg['old']=po
+        except Exception:pass
     if campaign and campaign.get('effective'):
         eff=float(campaign['effective'])
-        if abs(c-eff)/max(eff,1)<=0.08:
-            current=eff
-        elif live:
-            current=live
+        if abs(c-eff)/max(eff,1)<=0.08:current=eff
+        elif live:current=live
         else:current=c
-    elif live:
-        current=live if abs(live-c)/max(live,1)>0.03 else c
+    elif live:current=live if abs(live-c)/max(live,1)>0.03 else c
     else:current=c
-    try:
-        floor,med,n,msrc=market_snapshot(t)
-    except Exception:
-        floor=med=None;n=0;msrc='market-error'
-    # For campaign deals the normal page price is a useful, honest baseline.
+    hist=own_history(u,current)
+    if API_FREE:
+        floor=med=None;n=0;msrc='api-free'
+    else:
+        try:floor,med,n,msrc=market_snapshot(t)
+        except Exception:floor=med=None;n=0;msrc='market-error'
     page_ref=(live if campaign and live and live>current else pg.get('old'))
-    ref,ref_source=choose_reference(current,history=None,source=p,page=page_ref,market_median=med,market_floor=floor)
-    print(f'DOĞRULAMA | {source}:{post_id} | kaynak_fiyat={c:.2f} canlı={live or 0:.2f} efektif={campaign.get("effective") if campaign else 0} piyasa={med or 0:.2f} kaynak_ref={p or 0:.2f} seçilen_ref={ref or 0:.2f} | {ref_source}')
+    ref,ref_source=choose_reference(current,history=hist,source=p,page=page_ref,market_median=med,market_floor=floor)
+    print(f'DOĞRULAMA | {source}:{post_id} | kaynak_fiyat={c:.2f} canlı={live or 0:.2f} efektif={campaign.get("effective") if campaign else 0} geçmiş={len(hist)} piyasa={med or 0:.2f} kaynak_ref={p or 0:.2f} seçilen_ref={ref or 0:.2f} | {ref_source}/{msrc}')
     if not ref or ref<=current:
-        # Explicit multi-buy can still be a deal if the normal page price proves it.
         m=re.search(r'\b(\d+)\s*al\s*(\d+)\s*(?:öde|ode)\b',signal_clean,re.I)
         if m and live:
             buy,paid=int(m.group(1)),int(m.group(2))
@@ -145,7 +160,7 @@ def fetch_source(item):
     except Exception as e:print(f'Telegram kaynak hata {source}: {type(e).__name__}: {e}');return source,None
 
 def realtime_main():
-    print(f'=== Telegram gerçek-zamanlı tarama | eşik=%{ts.MIN_DISCOUNT:g} | yaş={ts.MAX_AGE} dk ===');fetched=[]
+    print(f'=== Telegram gerçek-zamanlı tarama | eşik=%{ts.MIN_DISCOUNT:g} | yaş={ts.MAX_AGE} dk | API={"YOK" if API_FREE else "VAR"} ===');fetched=[]
     with ThreadPoolExecutor(max_workers=len(ts.SOURCES)) as ex:
         for f in as_completed([ex.submit(fetch_source,x) for x in ts.SOURCES.items()]):
             source,r=f.result();blocks=[];newest_age=None
