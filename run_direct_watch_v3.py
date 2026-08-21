@@ -1,0 +1,125 @@
+import os,re,json,html,statistics,requests
+from datetime import datetime,timezone,timedelta
+from urllib.parse import urlparse,urlencode
+from playwright.sync_api import sync_playwright
+import local_store as ls
+import run_direct_watch_v2 as v2
+
+TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; CHANNEL_ID=os.environ.get('TELEGRAM_CHANNEL_ID','-1004424116637')
+MIN_DISCOUNT=float(os.environ.get('MIN_DISCOUNT','15'))
+MAX_PRODUCTS=max(20,int(os.environ.get('DIRECT_MAX_PRODUCTS','100')))
+BROWSER_LIMIT=max(5,int(os.environ.get('DIRECT_BROWSER_LIMIT','20')))
+FRESH_HOURS=max(1,int(os.environ.get('DIRECT_FRESH_SOURCE_HOURS','4')))
+COOLDOWN_HOURS=max(6,int(os.environ.get('DIRECT_COOLDOWN_HOURS','12')))
+AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
+STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'errors':0,'history_writes':0}
+
+def num(x):return v2.num(x)
+def fmt(x):return v2.fmt(x)
+def canonical(u):return ls.canonical(u)
+def site_of(u,s=''):return v2.site_of(u,s)
+
+def parse_dt(s):
+    try:return datetime.fromisoformat(str(s).replace('Z','+00:00'))
+    except:return None
+
+def local_hist(url):
+    rows=ls.history(url,days=365,limit=500);out=[]
+    for r in rows:
+        try:p=float(r.get('price'))
+        except:p=0
+        if p:out.append((p,r.get('old_price'),r.get('source'),r.get('recorded_at')))
+    return out
+
+def fresh_local_price(url):
+    rows=local_hist(url)
+    if not rows:return None
+    p,old,source,dt=rows[0];d=parse_dt(dt)
+    if not d or datetime.now(timezone.utc)-d>timedelta(hours=FRESH_HOURS):return None
+    return {'live':p,'old':float(old) if old else None,'title':'','image':'','oos':False,'source':source,'recorded_at':dt}
+
+def reference(current,hist,page_old=None,stored_old=None):
+    vals=[];explicit=[]
+    for p,old,source,dt in hist:
+        if current*1.03<p<=current*1.65:vals.append(p)
+        if old and current*1.03<float(old)<=current*1.65:explicit.append(float(old))
+    if page_old and current*1.03<page_old<=current*1.65:explicit.append(page_old)
+    if stored_old and current*1.03<stored_old<=current*1.65:explicit.append(stored_old)
+    # Explicit old/list prices are strong. Otherwise require at least 2 historical observations.
+    if explicit:return min(explicit),'explicit-old'
+    if len(vals)>=2:
+        vals=sorted(vals)
+        # conservative lower-middle historical price, not the maximum
+        return float(statistics.median(vals)),'local-history'
+    return None,'none'
+
+def merge_catalog():
+    merged={}
+    for r in ls.list_products(MAX_PRODUCTS*3):
+        u=canonical(r.get('url') or '');s=site_of(u,r.get('site') or '')
+        if s in {'Amazon','Hepsiburada','Trendyol'} and u.startswith('http'):
+            merged[u]={'id':None,'product_url':u,'site':s,'product_name':r.get('title') or 'Ürün','current_price':r.get('last_price'),'previous_price':r.get('last_old_price'),'last_posted_at':None,'local_last_seen':r.get('last_seen')}
+    try:
+        for r in v2.load_catalog():
+            u=canonical(r.get('product_url') or '');s=site_of(u,r.get('site') or '')
+            if not u or s not in {'Amazon','Hepsiburada','Trendyol'}:continue
+            if u in merged:merged[u].update({k:v for k,v in r.items() if v not in (None,'')})
+            else:merged[u]=r
+    except Exception as e:print(f'SUPABASE KATALOG UYARI: {type(e).__name__}: {e}')
+    rows=list(merged.values())
+    rows.sort(key=lambda x:x.get('updated_at') or x.get('local_last_seen') or '')
+    return rows[:MAX_PRODUCTS]
+
+def outlink(url,site):
+    u=canonical(url)
+    if site=='Amazon' and AMAZON_TAG:return u+'?'+urlencode({'tag':AMAZON_TAG})
+    return u
+
+def send(row,current,ref,title,image,site,refsrc):
+    disc=(ref-current)/ref*100
+    url=outlink(row['product_url'],site)
+    lines=[f'⭐️⭐️⭐️ 🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}',f'💰 {fmt(current)} TL',f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site}','','👇 <a href="'+html.escape(url,quote=True)+'"><b>Fırsata git</b></a>']
+    kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':url}]]};text='\n'.join(lines);resp=None
+    if image:
+        try:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHANNEL_ID,'photo':image,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(kb,ensure_ascii=False)},timeout=18)
+        except:resp=None
+    if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','reply_markup':kb},timeout=18)
+    if not resp.ok:raise RuntimeError(f'Telegram {resp.status_code}: {resp.text[:160]}')
+    STATS['sent']+=1;print(f'GÖNDERİLDİ: {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | ref={refsrc} | {title[:70]}')
+
+def main():
+    rows=merge_catalog();STATS['catalog']=len(rows)
+    print(f'=== API-SİZ fiyat takip V3 | VPS-fiyat-hafızası | katalog={len(rows)} | browser_limit={BROWSER_LIMIT} | taze_kaynak={FRESH_HOURS}saat ===')
+    browser_used=0
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled']);page=browser.new_page()
+        for row in rows:
+            try:
+                STATS['checked']+=1;url=canonical(row.get('product_url'));site=site_of(url,row.get('site') or '');expected=num(row.get('current_price'))
+                info=v2.http_check(url,expected)
+                if info and info.get('oos'):
+                    STATS['oos']+=1;continue
+                if info and info.get('live'):STATS['http_live']+=1
+                if (not info or not info.get('live')) and browser_used<BROWSER_LIMIT:
+                    browser_used+=1;STATS['browser']+=1;info=v2.browser_check(page,url,expected) or info
+                if not info or not info.get('live'):
+                    info=fresh_local_price(url)
+                    if info:STATS['local_fresh']+=1
+                if not info or not info.get('live'):
+                    STATS['no_price']+=1;print(f'FİYAT YOK: {site} | {row.get("product_name","")[:80]}');continue
+                current=float(info['live']);hist=local_hist(url);ref,refsrc=reference(current,hist,info.get('old'),num(row.get('previous_price')))
+                ls.upsert_product(url,site,info.get('title') or row.get('product_name') or 'Ürün',current,info.get('old') or num(row.get('previous_price')),info.get('source') or 'direct','',info.get('image') or '')
+                ls.add_price(url,site,current,info.get('old'),'direct-check','') ;STATS['history_writes']+=1
+                title=(info.get('title') or row.get('product_name') or 'Ürün')[:300]
+                if not ref:
+                    STATS['no_ref']+=1;print(f'REFERANS YOK: {site} | {current:.2f} | lokal_geçmiş={len(hist)} | {title[:70]}');continue
+                disc=(ref-current)/ref*100
+                print(f'KONTROL: {site} | {current:.2f} -> ref {ref:.2f} | %{disc:.1f} | kaynak={info.get("source","web")} | ref={refsrc} | geçmiş={len(hist)} | {title[:60]}')
+                if disc<MIN_DISCOUNT:STATS['below']+=1;continue
+                send(row,current,ref,title,info.get('image'),site,refsrc)
+            except Exception as e:
+                STATS['errors']+=1;print(f'ÜRÜN HATA: {type(e).__name__}: {e}')
+        browser.close()
+    print('=== API-SİZ V3 BİTTİ | '+' | '.join(f'{k}={v}' for k,v in STATS.items())+' | lokal='+str(ls.stats())+' ===')
+
+if __name__=='__main__':main()
