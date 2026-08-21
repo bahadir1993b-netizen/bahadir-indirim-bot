@@ -7,5 +7,7 @@ services:
       - .env
     environment:
       SCAN_INTERVAL: ${SCAN_INTERVAL:-1800}
+    volumes:
+      - ./data:/app/data
     command: >-
       sh -c 'while true; do python run_serper.py; code=$$?; echo "Bot turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
