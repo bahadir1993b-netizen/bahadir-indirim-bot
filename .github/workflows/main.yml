@@ -82,6 +82,7 @@ jobs:
 
             # Hepsiburada + Trendyol tek başına bu motorda çalışır.
             # İlk gözlemde arama kartındaki eski fiyat kesinlikle referans alınmaz.
+            python apply_historical_reference_guard.py
             timeout 180s python marketplace_nonamazon_scanner.py || echo "Hepsiburada/Trendyol taraması bu turda hata verdi; Amazon taramasına geçiliyor."
 
             # Amazon motorunu mevcut haliyle koruyoruz. HB/Trendyol burada
@@ -89,8 +90,10 @@ jobs:
             python apply_amazon_only_marketplace_runtime.py
             sed -i 's/MIN_DISCOUNT = 10.0/MIN_DISCOUNT = 15.0/' marketplace_scanner.py
             python apply_scanner_runtime_patch.py
+            python apply_amazon_price_source_guard.py
             python apply_marketplace_rescue_patch.py
             python apply_final_price_guard.py
+            python apply_historical_reference_guard.py
             timeout 420s python marketplace_scanner.py || echo "Amazon marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
 
             remaining=$((end - SECONDS))
