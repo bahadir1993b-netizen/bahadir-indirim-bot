@@ -48,7 +48,14 @@ def resolve_v3(it,site):
 v2.resolve=resolve_v3
 
 def render_verify_v3(link,current,title):
-    if v2.COUNTERS['render']>=v2.MAX_RENDER:return None,None,''
+    """Stock policy:
+    - Explicit out-of-stock text => block.
+    - Add-to-cart/buy button => definitely available.
+    - Otherwise, if a real product page rendered without an explicit OOS marker,
+      do NOT block the deal merely because stock could not be positively proven.
+    This avoids discarding most Trendyol/Hepsiburada/Amazon products due to dynamic UI.
+    """
+    if v2.COUNTERS['render']>=v2.MAX_RENDER:return True,None,''
     v2.COUNTERS['render']+=1
     try:
         with sync_playwright() as pw:
@@ -56,10 +63,11 @@ def render_verify_v3(link,current,title):
             p=b.new_page(user_agent=v2.bot.HEADERS.get('User-Agent'),locale='tr-TR')
             p.goto(link,wait_until='domcontentloaded',timeout=22000);p.wait_for_timeout(1800)
             body=re.sub(r'\s+',' ',p.locator('body').inner_text(timeout=7000));low=body.lower()
-            bad=['stokta yok','stokta bulunmuyor','stokta bulunmamaktadır','ürün tükendi','urun tukendi','tükendi','tukendi','out of stock','sold out','currently unavailable','satışa kapalı','satisa kapali']
-            if any(x in low for x in bad):b.close();return False,None,''
-            buy_words=['sepete ekle','hemen al','şimdi al','simdi al','add to cart','buy now','sepete at']
-            avail=True if any(x in low for x in buy_words) else None
+            bad=['stokta yok','stokta bulunmuyor','stokta bulunmamaktadır','ürün tükendi','urun tukendi','tükendi','tukendi','out of stock','sold out','currently unavailable','satışa kapalı','satisa kapali','bu ürün şu anda mevcut değil','bu urun su anda mevcut degil']
+            if any(x in low for x in bad):
+                b.close();return False,None,''
+            buy_words=['sepete ekle','hemen al','şimdi al','simdi al','add to cart','buy now','sepete at','satın al','satin al']
+            has_buy=any(x in low for x in buy_words)
             vals=[]
             sels=['.a-price .a-offscreen','.apexPriceToPay .a-offscreen','[data-test-id="price-current-price"]','[class*="currentPrice"]','[class*="salePrice"]','.prc-dsc','.prc-slg','[itemprop="price"]','meta[property="product:price:amount"]']
             for sel in sels:
@@ -69,17 +77,23 @@ def render_verify_v3(link,current,title):
                         e=loc.nth(i);val=e.get_attribute('content') or e.inner_text(timeout=500);x=v2.pprice(val)
                         if x and current*.55<=x<=current*1.55:vals.append(x)
                 except:pass
-            # If there is a credible live price and no explicit out-of-stock marker,
-            # treat the rendered product page as purchasable enough to continue.
             rv=min(vals,key=lambda x:abs(x-current)) if vals else None
-            if avail is None and rv is not None:avail=True
             try:ttl=re.sub(r'\s+',' ',p.locator('h1').first.inner_text(timeout=1500)).strip()
             except:ttl=''
-            b.close();return avail,rv,ttl
+            # Important: unknown stock is no longer a blocker. A valid rendered product page
+            # with no explicit OOS signal is allowed through. has_buy is still useful evidence.
+            if has_buy:
+                print(f'RENDER STOK ONAYI: sepete/satın al butonu bulundu | {title[:65]}')
+            elif rv is not None:
+                print(f'RENDER STOK VARSAYIMI: canlı fiyat var, stok dışı işareti yok | {title[:65]}')
+            else:
+                print(f'RENDER STOK VARSAYIMI: stok dışı işareti yok, aday engellenmedi | {title[:65]}')
+            b.close();return True,rv,ttl
     except Exception as e:
-        print(f'RENDER HATA: {type(e).__name__} | {title[:60]}');return None,None,''
+        # Browser/render failures must not kill a deal. Explicit OOS is the only hard stock block.
+        print(f'RENDER HATA (stok engeli uygulanmadı): {type(e).__name__} | {title[:60]}');return True,None,''
 v2.render_verify=render_verify_v3
 
 if __name__=='__main__':
-    print('=== Serper V3 aktif | yüksek link çözüm + güvenli piyasa + gelişmiş render ===')
+    print('=== Serper V3 aktif | yüksek link çözüm + güvenli piyasa + stok: sadece açıkça yoksa engel ===')
     v2.main()
