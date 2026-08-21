@@ -2,6 +2,7 @@ import os,re,time,json,hashlib,statistics,requests,math
 from pathlib import Path
 
 SERPER_API_KEY=(os.environ.get('SERPER_API_KEY') or '').strip()
+SERPER_DISABLED=str(os.environ.get('SERPER_DISABLED','0')).strip().lower() in {'1','true','yes','on'}
 CACHE_FILE=Path('/app/data/market_reference_cache.json')
 CACHE_FILE.parent.mkdir(parents=True,exist_ok=True)
 try:CACHE=json.loads(CACHE_FILE.read_text('utf-8')) if CACHE_FILE.exists() else {}
@@ -50,8 +51,6 @@ def _robust_prices(vals):
     vals=sorted(set(round(float(v),2) for v in vals if v and v>1))
     if len(vals)<2:return []
     floor=vals[0]
-    # Exact-product offers should form one price cluster. This intentionally rejects
-    # wrong variants/sellers and malformed values such as 584.995 TL beside 550 TL.
     close=[p for p in vals if p<=floor*1.65]
     if len(close)<2:return []
     vals=close
@@ -68,11 +67,12 @@ def _robust_prices(vals):
     return vals
 
 def market_snapshot(title):
-    if not SERPER_API_KEY or not title:return None,None,0,'none'
-    # snap5 invalidates all earlier cached medians after stricter cluster validation.
+    if not title:return None,None,0,'none'
     k='snap5:'+_key(title);x=CACHE.get(k)
     if isinstance(x,dict) and time.time()-float(x.get('ts') or 0)<7200:
         return _price(x.get('floor')),_price(x.get('median')),int(x.get('n') or 0),'cache'
+    if SERPER_DISABLED:return None,None,0,'api-free'
+    if not SERPER_API_KEY:return None,None,0,'none'
     try:
         q=re.sub(r'\s+',' ',title).strip()[:180]
         r=requests.post('https://google.serper.dev/shopping',headers={'X-API-KEY':SERPER_API_KEY,'Content-Type':'application/json'},json={'q':q,'gl':'tr','hl':'tr','location':'Turkey','num':60},timeout=15)
