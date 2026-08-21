@@ -65,6 +65,9 @@ jobs:
       - name: SON FOTOĞRAF GÖNDERİM KORUMASI
         run: python apply_final_telegram_photo_guard.py
 
+      - name: Telegram ürün durum bilgilerini ekle
+        run: python apply_listing_condition_patch.py
+
       - name: Telegram kaynak indirim eşiğini %15 yap
         run: |
           sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
