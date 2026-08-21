@@ -10,7 +10,7 @@ services:
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_serper.py; code=$$?; echo "Serper turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
+      sh -c 'while true; do python run_serper_reported.py; code=$$?; echo "Serper turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
 
   telegram-bot:
     build: .
