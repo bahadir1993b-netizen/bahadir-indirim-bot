@@ -62,10 +62,14 @@ jobs:
       - name: Telegram fotoğraf CDN düzeltmesi
         run: python apply_telegram_photo_hardening.py
 
+      - name: SON FOTOĞRAF GÖNDERİM KORUMASI
+        run: python apply_final_telegram_photo_guard.py
+
       - name: Telegram kaynak indirim eşiğini %15 yap
         run: |
           sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
           sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=15.0/' telegram_sources.py
+          sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=15.0/' telegram_fast_sources.py
 
       - name: 🚀 Telegram 5 dakikalık otomatik tarama döngüsü
         timeout-minutes: 340
