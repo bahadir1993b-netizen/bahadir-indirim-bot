@@ -113,12 +113,30 @@ services:
     environment:
       LOCAL_PRICE_DB: /app/data/price_memory.db
       AKAKCE_INTERVAL: ${AKAKCE_INTERVAL:-600}
-      AKAKCE_LIMIT: ${AKAKCE_LIMIT:-100}
+      AKAKCE_LIMIT: ${AKAKCE_LIMIT:-120}
       AKAKCE_SLEEP: ${AKAKCE_SLEEP:-0.8}
     volumes:
       - ./data:/app/data
     command: >-
       sh -c 'while true; do python run_akakce_enricher.py; code=$$?; echo "Akakçe zenginleştirme bitti (kod=$$code). ${AKAKCE_INTERVAL:-600} sn sonra tekrar."; sleep ${AKAKCE_INTERVAL:-600}; done'
+
+  google-shopping-harvester:
+    build: .
+    container_name: bahadir-google-shopping-harvester
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+      GOOGLE_SHOPPING_INTERVAL: ${GOOGLE_SHOPPING_INTERVAL:-1800}
+      GOOGLE_SHOPPING_LIMIT: ${GOOGLE_SHOPPING_LIMIT:-30}
+      GOOGLE_SHOPPING_SLEEP: ${GOOGLE_SHOPPING_SLEEP:-2.2}
+      SERPER_DISABLED: "1"
+      SERPER_API_KEY: ""
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_google_shopping_harvester.py; code=$$?; echo "Google Shopping hasadı bitti (kod=$$code). ${GOOGLE_SHOPPING_INTERVAL:-1800} sn sonra tekrar."; sleep ${GOOGLE_SHOPPING_INTERVAL:-1800}; done'
 
   serper-seed:
     build: .
