@@ -20,7 +20,7 @@ MAX_MARKET_CHECKS=int(os.environ.get('MAX_MARKET_REF_PER_RUN','14'))
 NEGATIVE_CACHE_SECONDS=int(os.environ.get('NEGATIVE_CACHE_SECONDS','7200'))
 CACHE_FILE=Path('/app/data/link_cache.json');CACHE_FILE.parent.mkdir(parents=True,exist_ok=True)
 _resolve_count=0;_market_checks=0
-STATS={'seen':0,'no_price':0,'no_link':0,'no_ref':0,'below':0,'cooldown':0,'sent':0,'errors':0,'amazon':0,'hepsiburada':0,'trendyol':0,'live_corrected':0,'market_blocked':0,'market_ref':0,'page_ref':0,'history_ref':0,'source_ref':0,'title_enriched':0}
+STATS={'seen':0,'no_price':0,'no_link':0,'no_ref':0,'below':0,'cooldown':0,'sent':0,'errors':0,'amazon':0,'hepsiburada':0,'trendyol':0,'live_corrected':0,'market_blocked':0,'market_ref':0,'page_ref':0,'history_ref':0,'source_ref':0,'title_enriched':0,'no_stock':0,'stock_unknown':0}
 try:_link_cache=json.loads(CACHE_FILE.read_text('utf-8')) if CACHE_FILE.exists() else {}
 except Exception:_link_cache={}
 
@@ -121,12 +121,42 @@ def item_reference_price(item,current):
             if p and current*1.03<p<=current*2.2:vals.append(p)
     walk(item);return max(vals) if vals else None
 
+def _availability_from_json(obj):
+    vals=[]
+    def walk(x,key=''):
+        if isinstance(x,dict):
+            for k,v in x.items():walk(v,str(k).lower())
+        elif isinstance(x,list):
+            for v in x:walk(v,key)
+        elif 'availability' in key or key in ('stock','stockstatus','availabilitystatus'):
+            vals.append(str(x).lower())
+    walk(obj)
+    if any(any(z in v for z in ('outofstock','out_of_stock','soldout','sold_out','tükendi','tukendi','stokta yok')) for v in vals):return False
+    if any(any(z in v for z in ('instock','in_stock','limitedavailability','preorder','stokta')) for v in vals):return True
+    return None
+
 def page_info(link,serper_current,serper_title):
-    out={'image':'','title':'','live':None,'old':None}
+    out={'image':'','title':'','live':None,'old':None,'available':None}
     try:
         r=requests.get(link,headers=bot.HEADERS,timeout=10,allow_redirects=True)
         if not r.ok:return out
         soup=BeautifulSoup(r.text,'html.parser')
+        full_text=re.sub(r'\s+',' ',soup.get_text(' ',strip=True)).lower()
+        # Explicit out-of-stock text has priority. This prevents stale Shopping prices being posted.
+        out_patterns=['stokta yok','stokta bulunmamaktadır','stokta bulunmuyor','ürün tükendi','urun tukendi','tükendi','tukendi','satışa kapalı','satisa kapali','currently unavailable','temporarily out of stock','out of stock','sold out']
+        if any(x in full_text for x in out_patterns):out['available']=False
+        # Structured product availability is stronger than button heuristics.
+        for sc in soup.select('script[type="application/ld+json"]'):
+            try:
+                obj=json.loads(sc.string or sc.get_text() or '{}');av=_availability_from_json(obj)
+                if av is False:out['available']=False
+                elif av is True and out['available'] is None:out['available']=True
+            except Exception:pass
+        # Common disabled/sold-out purchase buttons.
+        for e in soup.select('button,[role="button"]'):
+            txt=re.sub(r'\s+',' ',e.get_text(' ',strip=True)).lower()
+            if any(z in txt for z in ('stokta yok','tükendi','tukendi','sold out','out of stock')):
+                out['available']=False
         for sel,attr in [('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('img[itemprop="image"]','src')]:
             e=soup.select_one(sel)
             if e and (e.get(attr) or '').startswith('http'):out['image']=e.get(attr);break
@@ -148,9 +178,10 @@ def page_info(link,serper_current,serper_title):
             for e in soup.select(sel):
                 p=parse_price(e.get('content') or e.get('data-price') or e.get_text(' ',strip=True))
                 if p and serper_current*1.03<p<=serper_current*2.2:old.append(p)
-        # Prefer the lowest credible live offer displayed on the exact product page.
         if live:out['live']=min(live)
         if old:out['old']=max(old)
+        # If there is a credible live price and no explicit sold-out signal, assume purchasable.
+        if out['available'] is None and out['live'] is not None:out['available']=True
     except Exception as e:print(f'Sayfa okuma hata: {type(e).__name__}')
     return out
 
@@ -158,7 +189,6 @@ def product_identity(link):return canonical_for_db(link)
 
 def enrich_title(base,page_title):
     if not page_title:return base
-    # Page title is especially valuable when Serper omitted model/size such as TV inches.
     better=page_title if len(tokens(page_title))>=len(tokens(base)) else base
     better=re.sub(r'\s*[-|]\s*(Amazon.*|Hepsiburada.*|Trendyol.*)$','',better,flags=re.I).strip()
     return better[:300]
@@ -173,7 +203,15 @@ def process_item(item):
     base_title=re.sub(r'\s+',' ',item.get('title') or 'Ürün').strip()[:300]
     link=resolve_direct_link(item,site)
     if not link:STATS['no_link']+=1;return False
-    pg=page_info(link,serper_current,base_title);current=serper_current
+    pg=page_info(link,serper_current,base_title)
+    if pg['available'] is False:
+        STATS['no_stock']+=1
+        print(f'STOK ENGELİ: {site} | stokta yok | {base_title[:75]} | {link[:120]}')
+        return False
+    if pg['available'] is None:
+        STATS['stock_unknown']+=1
+        print(f'STOK BELİRSİZ: {site} | sayfadan kesin doğrulanamadı | {base_title[:70]}')
+    current=serper_current
     if pg['live'] and abs(pg['live']-serper_current)/serper_current>=0.025:
         current=pg['live'];STATS['live_corrected']+=1
         print(f'CANLI FİYAT DÜZELTİLDİ: {site} | Serper={serper_current:.2f} -> Sayfa={current:.2f} | {base_title[:55]}')
@@ -182,7 +220,6 @@ def process_item(item):
     db_url=product_identity(link);now=datetime.now(timezone.utc).isoformat();image=item.get('imageUrl') or pg['image']
     try:
         rows=bot.sb('GET','products',params={'select':'*','product_url':f'eq.{db_url}','limit':'1'});old=bot.history(db_url)
-        # Same-product history: median of materially higher observations is safer than historical maximum.
         higher=[x for x in old if current*1.03<x<=current*2.2]
         hist_ref=float(statistics.median(higher)) if higher else None
         source_ref=item_reference_price(item,current);page_ref=pg['old'] if pg['old'] and pg['old']>current else None
@@ -191,14 +228,12 @@ def process_item(item):
         if page_ref:STATS['page_ref']+=1
         raw_ref=max([x for x in (hist_ref,source_ref,page_ref) if x],default=None)
         market_floor=market_med=None;market_n=0
-        # Market validation is mandatory for would-be deals and useful for products with no reference.
         candidate=bool(raw_ref and (raw_ref-current)/raw_ref*100>=bot.MIN_DISCOUNT)
         if _market_checks<MAX_MARKET_CHECKS and (candidate or raw_ref is None):
             _market_checks+=1;market_floor,market_med,market_n,msrc=market_snapshot(title)
             if market_med:print(f'PİYASA KONTROL: {site} | ürün={current:.2f} | en_ucuz={market_floor:.2f} | medyan={market_med:.2f} | n={market_n} | {title[:55]}')
         prev=raw_ref;ref_kind='yerel'
         if market_med:
-            # If the same product is already materially cheaper elsewhere, this is not a deal.
             if market_floor and current>market_floor*1.05:
                 STATS['market_blocked']+=1
                 print(f'PİYASA ENGELİ: {site} | {current:.2f} > piyasa en ucuz {market_floor:.2f} | {title[:65]}')
@@ -240,12 +275,12 @@ def process_item(item):
 def main():
     global _resolve_count,_market_checks
     _resolve_count=0;_market_checks=0
-    print(f'=== Serper alışveriş botu başladı | eşik=%{bot.MIN_DISCOUNT:g} | canlı fiyat + piyasa koruması ===')
+    print(f'=== Serper alışveriş botu başladı | eşik=%{bot.MIN_DISCOUNT:g} | canlı fiyat + piyasa + stok koruması ===')
     seen=set();matched=0
     for q in QUERIES:
         for item in serper_shopping(q):
             site=site_from_item(item);pid=str(item.get('productId') or '').strip();title=re.sub(r'\s+',' ',item.get('title') or '').strip().lower();key=(site,pid or title)
             if not site or key in seen:continue
             seen.add(key);matched+=1;process_item(item)
-    print(f'=== Bitti. Hedef={matched} | Amazon={STATS["amazon"]} HB={STATS["hepsiburada"]} Trendyol={STATS["trendyol"]} | fiyat_yok={STATS["no_price"]} link_yok={STATS["no_link"]} referans_yok={STATS["no_ref"]} esik_alti={STATS["below"]} cooldown={STATS["cooldown"]} hata={STATS["errors"]} | canlı_düzelt={STATS["live_corrected"]} başlık_zengin={STATS["title_enriched"]} piyasa_engel={STATS["market_blocked"]} piyasa_ref={STATS["market_ref"]} | link_sorgu={_resolve_count} piyasa_sorgu={_market_checks} | Gönderilen={STATS["sent"]} ===')
+    print(f'=== Bitti. Hedef={matched} | Amazon={STATS["amazon"]} HB={STATS["hepsiburada"]} Trendyol={STATS["trendyol"]} | fiyat_yok={STATS["no_price"]} link_yok={STATS["no_link"]} stok_yok={STATS["no_stock"]} stok_belirsiz={STATS["stock_unknown"]} referans_yok={STATS["no_ref"]} esik_alti={STATS["below"]} cooldown={STATS["cooldown"]} hata={STATS["errors"]} | canlı_düzelt={STATS["live_corrected"]} başlık_zengin={STATS["title_enriched"]} piyasa_engel={STATS["market_blocked"]} piyasa_ref={STATS["market_ref"]} | link_sorgu={_resolve_count} piyasa_sorgu={_market_checks} | Gönderilen={STATS["sent"]} ===')
 if __name__=='__main__':main()
