@@ -79,6 +79,7 @@ jobs:
             cycle=$((cycle + 1))
             cycle_start=$SECONDS
             echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            sed -i 's/MIN_DISCOUNT = 10.0/MIN_DISCOUNT = 15.0/' marketplace_scanner.py
             python apply_scanner_runtime_patch.py
             python apply_marketplace_rescue_patch.py
             timeout 420s python marketplace_scanner.py || echo "Marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
