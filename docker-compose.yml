@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      SCAN_INTERVAL: ${SCAN_INTERVAL:-1800}
+      SCAN_INTERVAL: ${SCAN_INTERVAL:-600}
       DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-120}
       DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-24}
       DIRECT_FRESH_SOURCE_HOURS: ${DIRECT_FRESH_SOURCE_HOURS:-4}
@@ -16,7 +16,7 @@ services:
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_direct_reported.py; code=$$?; echo "API-siz V4 fiyat takip turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
+      sh -c 'while true; do python run_direct_reported.py; code=$$?; echo "API-siz V4 fiyat takip turu bitti (kod=$$code). ${SCAN_INTERVAL:-600} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-600}; done'
 
   telegram-bot:
     build: .
@@ -34,6 +34,25 @@ services:
       - ./data:/app/data
     command: >-
       sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
+
+  price-sampler:
+    build: .
+    container_name: bahadir-price-sampler
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+      PRICE_SAMPLE_INTERVAL: ${PRICE_SAMPLE_INTERVAL:-900}
+      PRICE_SAMPLE_LIMIT: ${PRICE_SAMPLE_LIMIT:-220}
+      PRICE_SAMPLE_SLEEP: ${PRICE_SAMPLE_SLEEP:-0.15}
+      PRICE_SAMPLE_DEAL_PCT: ${PRICE_SAMPLE_DEAL_PCT:-15}
+      SERPER_DISABLED: "1"
+      SERPER_API_KEY: ""
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_price_sampler.py; code=$$?; echo "Sürekli fiyat örnekleme bitti (kod=$$code). ${PRICE_SAMPLE_INTERVAL:-900} sn sonra tekrar."; sleep ${PRICE_SAMPLE_INTERVAL:-900}; done'
 
   history-harvester:
     build: .
@@ -76,13 +95,13 @@ services:
       - .env
     environment:
       LOCAL_PRICE_DB: /app/data/price_memory.db
-      AKAKCE_INTERVAL: ${AKAKCE_INTERVAL:-7200}
+      AKAKCE_INTERVAL: ${AKAKCE_INTERVAL:-1800}
       AKAKCE_LIMIT: ${AKAKCE_LIMIT:-40}
       AKAKCE_SLEEP: ${AKAKCE_SLEEP:-0.7}
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_akakce_enricher.py; code=$$?; echo "Akakçe zenginleştirme bitti (kod=$$code). ${AKAKCE_INTERVAL:-7200} sn sonra tekrar."; sleep ${AKAKCE_INTERVAL:-7200}; done'
+      sh -c 'while true; do python run_akakce_enricher.py; code=$$?; echo "Akakçe 24/7 zenginleştirme bitti (kod=$$code). ${AKAKCE_INTERVAL:-1800} sn sonra tekrar."; sleep ${AKAKCE_INTERVAL:-1800}; done'
 
   serper-seed:
     build: .
