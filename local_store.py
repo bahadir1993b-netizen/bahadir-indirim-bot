@@ -68,7 +68,7 @@ def upsert_product(url,site='',title='',price=None,old_price=None,source='',post
     with _lock:
         c=conn()
         c.execute('''INSERT INTO products(url,site,title,image,first_seen,last_seen,last_price,last_old_price,source,source_post_id,check_count)
-                     VALUES(?,?,?,?,?,?,?,?,?,?,1)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(url) DO UPDATE SET
                        site=COALESCE(NULLIF(excluded.site,''),products.site),
                        title=CASE WHEN length(excluded.title)>length(products.title) THEN excluded.title ELSE products.title END,
@@ -88,7 +88,6 @@ def add_price(url,site,price,old_price=None,source='',post_id='',recorded_at=Non
     upsert_product(url,site,price=price,old_price=old_price,source=source,post_id=post_id)
     with _lock:
         c=conn()
-        # Avoid filling the DB with identical repeated samples within 30 minutes.
         row=c.execute('SELECT price,recorded_at FROM prices WHERE url=? ORDER BY recorded_at DESC LIMIT 1',(url,)).fetchone()
         should=True
         if row and abs(float(row['price'])-float(price))/max(float(price),1)<0.002:
@@ -120,7 +119,7 @@ def mark_post(source,post_id):
     with _lock:
         c=conn();c.execute('INSERT OR IGNORE INTO telegram_posts(source,post_id,seen_at) VALUES(?,?,?)',(source,str(post_id),_now()));c.commit();c.close()
 
-def seen_post(source,post_id):
+def post_seen(source,post_id):
     with _lock:
         c=conn();r=c.execute('SELECT 1 FROM telegram_posts WHERE source=? AND post_id=?',(source,str(post_id))).fetchone();c.close()
     return bool(r)
@@ -128,13 +127,9 @@ def seen_post(source,post_id):
 def get_cursor(source):
     with _lock:
         c=conn();r=c.execute('SELECT before_id FROM harvest_cursor WHERE source=?',(source,)).fetchone();c.close()
-    return int(r['before_id']) if r and r['before_id'] else None
+    return int(r['before_id']) if r and r['before_id'] is not None else None
 
 def set_cursor(source,before_id):
     with _lock:
-        c=conn();c.execute('INSERT INTO harvest_cursor(source,before_id,updated_at) VALUES(?,?,?) ON CONFLICT(source) DO UPDATE SET before_id=excluded.before_id,updated_at=excluded.updated_at',(source,int(before_id),_now()));c.commit();c.close()
-
-def stats():
-    with _lock:
-        c=conn();p=c.execute('SELECT count(*) n FROM products').fetchone()['n'];h=c.execute('SELECT count(*) n FROM prices').fetchone()['n'];t=c.execute('SELECT count(*) n FROM telegram_posts').fetchone()['n'];c.close()
-    return {'products':p,'prices':h,'telegram_posts':t,'db':DB_PATH}
+        c=conn();c.execute('''INSERT INTO harvest_cursor(source,before_id,updated_at) VALUES(?,?,?)
+          ON CONFLICT(source) DO UPDATE SET before_id=excluded.before_id,updated_at=excluded.updated_at''',(source,int(before_id),_now()));c.commit();c.close()
