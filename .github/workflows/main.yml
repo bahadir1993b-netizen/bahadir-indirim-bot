@@ -1,6 +1,7 @@
 name: Bahadir Indirim Botu
 
 # Marketplace katmanı runner açıkken kendi içinde 10 dakikalık döngüyle çalışır.
+# Actions yeniden tetikleme kontrolü: 2026-08-21 12:51 TRT
 on:
   workflow_dispatch:
   push:
