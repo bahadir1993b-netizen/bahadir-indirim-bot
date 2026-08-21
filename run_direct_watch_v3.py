@@ -18,13 +18,11 @@ def num(x):return v2.num(x)
 def fmt(x):return v2.fmt(x)
 def canonical(u):return ls.canonical(u)
 def site_of(u,s=''):return v2.site_of(u,s)
-
 def parse_dt(s):
     try:return datetime.fromisoformat(str(s).replace('Z','+00:00'))
     except:return None
 
 def local_hist(url):return ls.history(url,days=365,limit=700)
-
 def fresh_local_price(url):
     rows=local_hist(url)
     if not rows:return None
@@ -86,7 +84,7 @@ def main():
                 current=float(info['live']);title=(info.get('title') or row.get('product_name') or 'Ürün')[:300];hist=local_hist(url)
                 ref,refsrc=ar.smart_reference(title,current,hist,info.get('old'),num(row.get('previous_price')))
                 if refsrc.startswith('weighted') or refsrc=='deal-history-not-low':STATS['archive_ref']+=1
-                ls.upsert_product(url,site,title,current,info.get('old') or num(row.get('previous_price')),info.get('source') or 'direct','',info.get('image') or '')
+                ls.upsert_product(url,site=site,title=title,price=current,old_price=info.get('old') or num(row.get('previous_price')),source=info.get('source') or 'direct',post_id='',image=info.get('image') or '')
                 ls.add_price(url,site,current,info.get('old'),'direct-check','');ar.add(title,current,site,info.get('old'),'DirectCheck','direct-current',url);STATS['history_writes']+=1
                 if not ref:
                     STATS['no_ref']+=1;print(f'REFERANS YOK: {site} | {current:.2f} | url_geçmiş={len(hist)} | başlık_geçmiş={len(ar.history_by_title(title,365,50))} | neden={refsrc} | {title[:65]}');continue
