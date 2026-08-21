@@ -1,4 +1,4 @@
-import os,re,time,json,hashlib,statistics,requests
+import os,re,time,json,hashlib,statistics,requests,math
 from pathlib import Path
 
 SERPER_API_KEY=(os.environ.get('SERPER_API_KEY') or '').strip()
@@ -16,7 +16,6 @@ def _model_tokens(text):
         if any(c.isalpha() for c in x) and any(c.isdigit() for c in x):out.add(x.strip('-'))
     return out
 def _numbers(text):
-    # Product-defining sizes/counts, but ignore tiny generic numbers.
     return {x for x in re.findall(r'\b\d{2,4}\b',(text or '').lower()) if x not in {'2024','2025','2026'}}
 def _score(a,b):
     aa,bb=_tokens(a),_tokens(b)
@@ -25,12 +24,10 @@ def _score(a,b):
 def _identity_ok(query_title,result_title):
     qa=_model_tokens(query_title);qb=_model_tokens(result_title)
     if qa and not (qa & qb):return False
-    # If query has a distinctive screen/capacity/count number, require at least one shared number.
     na=_numbers(query_title);nb=_numbers(result_title)
     if na and len(na)<=4 and not (na&nb):
-        # Model token agreement is stronger than generic number agreement.
         if not (qa&qb):return False
-    return _score(query_title,result_title)>=0.68
+    return _score(query_title,result_title)>=0.70
 
 def _price(v):
     if v is None:return None
@@ -49,9 +46,27 @@ def _save():
     try:CACHE_FILE.write_text(json.dumps(CACHE,ensure_ascii=False),'utf-8')
     except Exception:pass
 
+def _robust_prices(vals):
+    vals=sorted(set(round(float(v),2) for v in vals if v and v>1))
+    if len(vals)<2:return []
+    # Build a realistic lower-price cluster. Marketplace feeds occasionally contain
+    # absurd variant/seller prices (e.g. 549 TL mixed with 584,995 TL).
+    floor=vals[0]
+    near=[p for p in vals if p<=floor*2.5]
+    if len(near)>=2:vals=near
+    if len(vals)>=4:
+        logs=sorted(math.log(p) for p in vals)
+        q1=statistics.median(logs[:len(logs)//2])
+        q3=statistics.median(logs[(len(logs)+1)//2:])
+        iqr=max(q3-q1,0.05)
+        lo,hi=q1-1.5*iqr,q3+1.5*iqr
+        trimmed=[p for p in vals if lo<=math.log(p)<=hi]
+        if len(trimmed)>=2:vals=trimmed
+    return vals
+
 def market_snapshot(title):
     if not SERPER_API_KEY or not title:return None,None,0,'none'
-    k='snap2:'+_key(title);x=CACHE.get(k)
+    k='snap3:'+_key(title);x=CACHE.get(k)
     if isinstance(x,dict) and time.time()-float(x.get('ts') or 0)<7200:
         return _price(x.get('floor')),_price(x.get('median')),int(x.get('n') or 0),'cache'
     try:
@@ -64,16 +79,19 @@ def market_snapshot(title):
             if not _identity_ok(title,rt):continue
             p=_price(it.get('price'))
             if p:vals.append(p)
-        vals=sorted(vals);clean=[]
-        for p in vals:
-            if not clean or abs(p-clean[-1])/max(p,1)>0.002:clean.append(p)
-        if len(clean)>=3:
-            med=float(statistics.median(clean));clean=[p for p in clean if med*0.60<=p<=med*1.75]
-        if not clean:
-            CACHE[k]={'ts':time.time(),'floor':None,'median':None,'n':0};_save();return None,None,0,'no-exact-match'
+        clean=_robust_prices(vals)
+        if len(clean)<2:
+            CACHE[k]={'ts':time.time(),'floor':None,'median':None,'n':len(clean)};_save();return None,None,len(clean),'insufficient-exact-matches'
         floor=min(clean);med=float(statistics.median(clean));n=len(clean)
+        # Final sanity bound. A reference several times the cheapest exact match is
+        # not useful as a normal market price.
+        if med>floor*2.2:
+            close=[p for p in clean if p<=floor*2.2]
+            if len(close)>=2:clean=close;floor=min(clean);med=float(statistics.median(clean));n=len(clean)
+            else:
+                CACHE[k]={'ts':time.time(),'floor':None,'median':None,'n':n};_save();return None,None,n,'unstable-market'
         CACHE[k]={'ts':time.time(),'floor':floor,'median':med,'n':n};_save()
-        return floor,med,n,'serper-market-strict'
+        return floor,med,n,'serper-market-robust'
     except Exception as e:return None,None,0,f'error-{type(e).__name__}'
 
 def market_reference(site,title,current):
