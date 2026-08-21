@@ -2,7 +2,7 @@ name: Bahadir Telegram Kaynak Tarama
 
 # Telegram fırsatlarını 5 dakikada bir tarar.
 # Push ile hemen başlar; schedule ise runner herhangi bir nedenle sona ererse
-a# yeni bir otomatik oturum başlatmak için 6 saatlik yedek tetikleyicidir.
+# yeni bir otomatik oturum başlatmak için 6 saatlik yedek tetikleyicidir.
 on:
   workflow_dispatch:
   push:
