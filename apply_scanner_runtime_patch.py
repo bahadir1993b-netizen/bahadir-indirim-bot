@@ -20,7 +20,7 @@ def _amazon_http_candidates(query):
     out, seen = [], set()
     try:
         url = 'https://www.amazon.com.tr/s?' + 'k=' + quote(query)
-        r = requests.get(url, headers=HEAD, timeout=10, allow_redirects=True)
+        r = requests.get(url, headers=HEAD, timeout=8, allow_redirects=True)
         if r.status_code >= 400:
             return out
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -50,14 +50,12 @@ def _amazon_http_candidates(query):
             if previous <= current or previous / max(current, 1) > 4.0:
                 continue
             discount = (previous-current) / previous * 100
-            if discount < MIN_DISCOUNT:
-                continue
-            if BOOK_RE.search(title):
+            if discount < MIN_DISCOUNT or BOOK_RE.search(title):
                 continue
             seen.add(target)
             out.append((target, title if len(title) >= 10 else 'Ürün', current, previous))
             _CANDIDATE_PREVIOUS[target] = previous
-            if len(out) >= 8:
+            if len(out) >= 6:
                 break
     except Exception as e:
         print(f'AMAZON HTTP ARAMA HATA | {query} | {type(e).__name__}: {e}')
@@ -69,13 +67,12 @@ def _search_engine_candidates(site, query):
     q = quote(f'site:{domain} {query} TL')
     engines = [
         f'https://www.google.com/search?q={q}&num=10',
-        f'https://www.bing.com/search?q={q}&count=10',
         f'https://html.duckduckgo.com/html/?q={q}'
     ]
     out, seen = [], set()
     for engine in engines:
         try:
-            r = requests.get(engine, headers=HEAD, timeout=10)
+            r = requests.get(engine, headers=HEAD, timeout=6)
             if r.status_code >= 400:
                 continue
             soup = BeautifulSoup(r.text, 'html.parser')
@@ -105,12 +102,12 @@ def _search_engine_candidates(site, query):
                 if previous <= current or previous / max(current, 1) > 4.0:
                     continue
                 discount = (previous-current)/previous*100
-                if discount < MIN_DISCOUNT:
+                if discount < MIN_DISCOUNT or BOOK_RE.search(title):
                     continue
                 seen.add(target)
                 out.append((target, title if len(title) >= 10 else 'Ürün', current, previous))
                 _CANDIDATE_PREVIOUS[target] = previous
-                if len(out) >= 8:
+                if len(out) >= 6:
                     return out
         except Exception as e:
             print(f'ARAMA MOTORU HATA | {site} | {type(e).__name__}: {e}')
@@ -118,16 +115,14 @@ def _search_engine_candidates(site, query):
 
 
 def extract_search_candidates(page, site, query):
-    # Amazon bazen Playwright navigasyonunda "Download is starting" döndürüyor.
-    # Önce normal HTTP aramasıyla ürün kartlarını al; başarısızsa browser/search-engine fallback kullan.
     if site == 'Amazon':
         direct = _amazon_http_candidates(query)
         if direct:
             print(f'BAĞIMSIZ ARAMA | {site} | "{query}" | aday={len(direct)} | HTTP')
             return direct
     try:
-        page.goto(MARKETS[site][0] + quote(query), wait_until='domcontentloaded', timeout=12000)
-        page.wait_for_timeout(1000)
+        page.goto(MARKETS[site][0] + quote(query), wait_until='domcontentloaded', timeout=10000)
+        page.wait_for_timeout(500)
         raw = page.locator('a[href]').evaluate_all("""els => els.map(a => { let p=a, card=''; for(let i=0;i<8&&p;i++,p=p.parentElement){let t=(p.innerText||'').replace(/\\s+/g,' ').trim(); if((t.match(/(?:TL|₺)/gi)||[]).length>=2){card=t;break}} return {href:a.href,text:(a.innerText||'').trim(),card}; })""")
         out, seen = [], set()
         for item in raw:
@@ -154,7 +149,7 @@ def extract_search_candidates(page, site, query):
                 continue
             out.append((url, title, current, previous))
             _CANDIDATE_PREVIOUS[url] = previous
-            if len(out) >= 8:
+            if len(out) >= 6:
                 break
         if out:
             print(f'BAĞIMSIZ ARAMA | {site} | "{query}" | aday={len(out)} | doğrudan')
@@ -174,16 +169,16 @@ if "def _verify_with_initial_reference" not in s:
     wrapper = r'''
 _ORIGINAL_VERIFY = verify
 
-def _verify_with_initial_reference(page, site, url, fallback_title, expected_current):
-    result = _ORIGINAL_VERIFY(page, site, url, fallback_title, expected_current)
+def _verify_with_initial_reference(page, site, url, fallback_title, expected_current, candidate_previous):
+    result = _ORIGINAL_VERIFY(page, site, url, fallback_title, expected_current, candidate_previous)
     if result:
         return result
-    ref_previous = _CANDIDATE_PREVIOUS.get(url)
+    ref_previous = _CANDIDATE_PREVIOUS.get(url) or candidate_previous
     if not ref_previous or ref_previous <= expected_current:
         return None
     try:
-        page.goto(url, wait_until='domcontentloaded', timeout=12000)
-        page.wait_for_timeout(500)
+        page.goto(url, wait_until='domcontentloaded', timeout=9000)
+        page.wait_for_timeout(300)
         soup = BeautifulSoup(page.content(), 'html.parser')
         page_text = soup.get_text(' ', strip=True)
         if BOOK_RE.search((fallback_title or '') + ' ' + page_text[:5000]):
@@ -225,4 +220,4 @@ verify = _verify_with_initial_reference
 
 P.write_text(s, encoding="utf-8")
 compile(s, str(P), "exec")
-print("Scanner runtime patch: Amazon HTTP fallback + stabil arama + affiliate + ilk gözlem referans fiyatı doğrulandı")
+print("Scanner runtime patch OK | Amazon HTTP + arama motoru fallback + ilk gözlem referansı + %10")
