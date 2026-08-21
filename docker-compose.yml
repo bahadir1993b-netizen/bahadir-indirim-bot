@@ -6,6 +6,6 @@ services:
     env_file:
       - .env
     environment:
-      SCAN_INTERVAL: ${SCAN_INTERVAL:-300}
+      SCAN_INTERVAL: ${SCAN_INTERVAL:-1800}
     command: >-
-      sh -c 'while true; do python run_nonamazon.py; code=$$?; echo "Bot turu bitti (kod=$$code). ${SCAN_INTERVAL:-300} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-300}; done'
+      sh -c 'while true; do python run_serper.py; code=$$?; echo "Bot turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
