@@ -29,6 +29,77 @@ def _first_price(page, selectors):
     return None
 
 
+def _continue_shopping_if_needed(page, target_url):
+    """Amazon'un VPS/IP ara sayfasındaki 'Alışverişe Devam Et' akışını geçmeyi dene."""
+    try:
+        body = page.locator('body').inner_text(timeout=2500)
+    except Exception:
+        body = ''
+    lowered = (body or '').lower()
+    if 'alışverişe devam et' not in lowered and 'continue shopping' not in lowered:
+        return False
+
+    print('Amazon ara sayfa algılandı; devam düğmesi deneniyor')
+    selectors = [
+        'text=Alışverişe Devam Et',
+        'text=Continue shopping',
+        'input[type="submit"]',
+        'button',
+        'a',
+    ]
+    clicked = False
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            count = min(loc.count(), 12)
+            for i in range(count):
+                node = loc.nth(i)
+                txt = ''
+                try:
+                    txt = (node.inner_text(timeout=300) or '').lower()
+                except Exception:
+                    try:
+                        txt = (node.get_attribute('value') or '').lower()
+                    except Exception:
+                        pass
+                if sel.startswith('text=') or 'alışverişe devam et' in txt or 'continue shopping' in txt:
+                    node.click(timeout=3000)
+                    clicked = True
+                    break
+            if clicked:
+                break
+        except Exception:
+            pass
+
+    if not clicked:
+        print('Amazon ara sayfa düğmesi bulunamadı')
+        return False
+
+    try:
+        page.wait_for_load_state('domcontentloaded', timeout=8000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+
+    # Buton bazen sadece cookie/oturum oluşturur ve ana sayfaya gönderir; hedef ürüne geri dön.
+    try:
+        if target_url not in page.url:
+            page.goto(target_url, wait_until='domcontentloaded')
+            page.wait_for_timeout(1800)
+    except Exception:
+        pass
+
+    try:
+        body2 = page.locator('body').inner_text(timeout=2500).lower()
+        if 'alışverişe devam et' in body2 or 'continue shopping' in body2:
+            print('Amazon ara sayfa devam ediyor')
+            return False
+    except Exception:
+        pass
+    print('Amazon ara sayfa geçildi')
+    return True
+
+
 def _amazon_price_values(page, html):
     selectors = [
         '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
@@ -143,7 +214,9 @@ def product_page(site, url, title, browser, search_ps=None):
         status = r.status if r else 0
         print(f'{site} ürün HTTP: {status} | {url}')
         if r and status < 400:
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(1200)
+            _continue_shopping_if_needed(page, url)
+            page.wait_for_timeout(1200)
             html = page.content()
             current = _amazon_price_values(page, html)
             jd_name, jd_vals = _jsonld_product(html)
