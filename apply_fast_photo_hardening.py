@@ -32,7 +32,7 @@ if start!=-1 and end!=-1:
 
 s=s.replace("requests.get(image,headers=HEAD,timeout=8)","requests.get(image,headers={**HEAD,'Referer':'https://t.me/'},timeout=8)")
 
-# Kupon/kod/kampanya satırlarını ürün başlığı kesilirken kaybetme.
+# Kupon/kod/kampanya bilgisini kaynak mesajından koru.
 marker='def process(source,b):\n'
 if marker not in s:
     raise RuntimeError('process() bulunamadı')
@@ -40,19 +40,26 @@ if 'def campaign_lines(raw):' not in s:
     fn='''def campaign_lines(raw):
  raw=raw or ''
  out=[]
- for line in re.split(r'[\\r\\n]+',raw):
-  x=re.sub(r'\\s+',' ',line).strip()
-  if not x: continue
-  if re.search(r'(?i)\\b(?:kod(?:u)?|kupon|coupon|promo(?:syon)?|sepette|kampanya)\\b',x):
-   x=re.sub(r'^[-•👉🔖🏷️\\s]+','',x).strip()
-   if x and x not in out: out.append(x[:180])
+ # Telegram HTML -> get_text(' ', ...) kullandığı için satır sonları kaybolabilir.
+ # Bu nedenle özellikle "AMZN1000 Kodu ile", "Kupon: ABC123" vb. kalıpları ayrıca yakala.
+ for m in re.finditer(r'(?i)\\b([A-Z0-9][A-Z0-9_-]{3,})\\s+Kodu(?:\\s+ile)?\\b',raw):
+  x=f'{m.group(1)} Kodu ile'
+  if x not in out: out.append(x)
+ for m in re.finditer(r'(?i)\\bkupon(?:\\s+kodu)?\\s*[:=-]\\s*([A-Z0-9][A-Z0-9_-]{3,})',raw):
+  x=f'Kupon kodu: {m.group(1)}'
+  if x not in out: out.append(x)
+ for m in re.finditer(r'(?i)\\bsepette\\s+([0-9A-Z][^\\n]{0,100})',raw):
+  x=re.sub(r'\\s+',' ',m.group(0)).strip()
+  if x not in out: out.append(x[:180])
  return out[:3]
 '''
     s=s.replace(marker,fn+'\n'+marker,1)
 
-needle="lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else '🔥 FIRSAT','',f'🛍️ {t}',f'💰 {c:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.') ]"
-if needle in s and "for camp in campaign_lines(raw):" not in s:
-    s=s.replace(needle,needle+"\n for camp in campaign_lines(raw):\n  lines.append('🏷️ '+camp)",1)
+if "for camp in campaign_lines(raw):" not in s:
+    marker2="\n if old and old>c:"
+    if marker2 not in s:
+        raise RuntimeError('mesaj fiyat/kupon ekleme noktası bulunamadı')
+    s=s.replace(marker2,"\n for camp in campaign_lines(raw):\n  lines.append('🏷️ '+camp)"+marker2,1)
 
 P.write_text(s,encoding='utf-8')
 compile(s,str(P),'exec')
