@@ -6,15 +6,14 @@ def patch_marketplace():
     s = p.read_text(encoding='utf-8')
     if 'def _bahadir_historical_only_verify' in s:
         return
-    marker = "if __name__ == '__main__':"
+    marker = "if __name__=='__main__':"
+    if marker not in s:
+        marker = "if __name__ == '__main__':"
     guard = r'''
 
 _ORIGINAL_HISTORICAL_VERIFY = verify
 
 def _bahadir_historical_only_verify(page, site, url, fallback_title, expected_current, candidate_previous):
-    # BOTUN KENDİ BULDUĞU FIRSATLARDA "önceki fiyat" arama kartındaki ikinci
-    # sayı olamaz. Önceki fiyat mutlaka Supabase price_history içinde daha
-    # önce kaydedilmiş gerçek bir fiyat olmalıdır.
     try:
         historical = history(site, url, expected_current)
     except Exception:
@@ -53,9 +52,7 @@ def patch_nonamazon():
 
 _ORIGINAL_NONAMAZON_VERIFY = verify
 
-def _bahadir_historical_only_nonamazon_verify(page, site, url, fallback_title, expected_current, candidate_previous):
-    # Hepsiburada/Trendyol için de arama kartındaki "eski fiyat" tek başına
-    # referans kabul edilmez. Önceki fiyat geçmişte gerçekten görülmüş olmalı.
+def _bahadir_historical_only_nonamazon_verify(page, site, url, fallback_title, expected_current, candidate_previous=None):
     try:
         historical = history(site, url, expected_current)
     except Exception:
