@@ -1,4 +1,12 @@
 import os
+
+# .env içinde SUPABASE_URL yanlışlıkla /rest/v1 ile bitiyorsa tüm alt modüllerden önce düzelt.
+# Böylece telegram_sources.py tekrar /rest/v1 eklediğinde /rest/v1/rest/v1 oluşmaz.
+_supabase = os.environ.get('SUPABASE_URL', '').rstrip('/')
+if _supabase.endswith('/rest/v1'):
+    _supabase = _supabase[:-8].rstrip('/')
+    os.environ['SUPABASE_URL'] = _supabase
+
 import bot
 import run_serper
 import telegram_sources
