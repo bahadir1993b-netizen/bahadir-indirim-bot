@@ -7,7 +7,7 @@ import archive_store as ar
 
 LIMIT=max(5,int(os.environ.get('AKAKCE_LIMIT','40')))
 SLEEP=max(.35,float(os.environ.get('AKAKCE_SLEEP','1.0')))
-CURSOR_KEY='akakce-product-index-v2'
+CURSOR_KEY='akakce-product-index-v3'
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9'}
 
 def money(s):
@@ -21,29 +21,53 @@ def money(s):
     try:return float(s)
     except:return None
 
-def toks(s):return {x for x in re.findall(r'[a-zçğıöşü0-9]{3,}',(s or '').lower()) if x not in {'urun','ürün','fiyat','fiyatları','model','yeni','icin','için','ile','ve','amazon','hepsiburada','trendyol'}}
+def clean_title(s):
+    s=str(s or '')
+    s=re.sub(r'https?://\S+',' ',s)
+    s=re.sub(r'(?i)fırsata\s*git|fir[sş]ata\s*git|kupon|sepette|kargo\s*bedava|amazon|hepsiburada|trendyol',' ',s)
+    s=re.sub(r'[🔥⭐️🛍️💰🏷️👇👉📣🎯✅🚨💥🔗🎁🟢🔴]+',' ',s)
+    s=re.sub(r'\b\d{1,3}(?:[.,]\d{1,2})?\s*TL\b',' ',s,flags=re.I)
+    s=re.sub(r'\s+',' ',s).strip(' -|')
+    return s[:180]
+
+def toks(s):return {x for x in re.findall(r'[a-zçğıöşü0-9]{3,}',clean_title(s).lower()) if x not in {'urun','ürün','fiyat','fiyatları','model','yeni','icin','için','ile','ve'}}
 def score(a,b):
     x,y=toks(a),toks(b)
     if not x or not y:return 0
     model={t for t in x if any(c.isdigit() for c in t)}
-    return len(x&y)/len(x)+(0.40 if model and model&y else 0)
+    return len(x&y)/len(x)+(0.45 if model and model&y else 0)
+
+def query_variants(title):
+    t=clean_title(title);ts=t.split();out=[t]
+    # uzun pazaryeri başlıklarında marka+model çekirdeği daha iyi sonuç verir
+    if len(ts)>8:out.append(' '.join(ts[:8]))
+    model=[x for x in ts if any(c.isdigit() for c in x)]
+    if model:out.append(' '.join((ts[:3]+model[:3])[:7]))
+    seen=[]
+    for q in out:
+        q=re.sub(r'\s+',' ',q).strip()
+        if len(q)>=4 and q not in seen:seen.append(q)
+    return seen[:3]
 
 def search(title):
-    url='https://www.akakce.com/arama/?q='+quote(' '.join(title.split())[:140])
-    r=requests.get(url,headers=HEAD,timeout=12)
-    if not r.ok:return None
-    soup=BeautifulSoup(r.text,'html.parser');best=None
-    for a in soup.select('a[href]'):
-        txt=a.get_text(' ',strip=True);href=a.get('href') or ''
-        if 'fiyati' not in href and 'en-ucuz' not in href:continue
-        sc=score(title,txt+' '+href)
-        if sc<0.54:continue
-        parent=a.parent;context=(parent.get_text(' ',strip=True) if parent else txt)[:1200]
-        m=re.search(r'En\s+Ucuz\s+([\d.,]+)\s*TL',context,re.I) or re.search(r'([\d.,]+)\s*TL',context,re.I)
-        p=money(m.group(1)) if m else None
-        if not p:continue
-        full=urljoin('https://www.akakce.com',href);cand=(sc,p,txt.strip() or title,full)
-        if best is None or cand[0]>best[0]:best=cand
+    best=None
+    for q in query_variants(title):
+        url='https://www.akakce.com/arama/?q='+quote(q[:140])
+        r=requests.get(url,headers=HEAD,timeout=12)
+        if not r.ok:continue
+        soup=BeautifulSoup(r.text,'html.parser')
+        for a in soup.select('a[href]'):
+            txt=a.get_text(' ',strip=True);href=a.get('href') or ''
+            if 'fiyati' not in href and 'en-ucuz' not in href:continue
+            sc=score(title,txt+' '+href)
+            if sc<0.50:continue
+            parent=a.parent;context=(parent.get_text(' ',strip=True) if parent else txt)[:1200]
+            m=re.search(r'En\s+Ucuz\s+([\d.,]+)\s*TL',context,re.I) or re.search(r'([\d.,]+)\s*TL',context,re.I)
+            p=money(m.group(1)) if m else None
+            if not p:continue
+            full=urljoin('https://www.akakce.com',href);cand=(sc,p,txt.strip() or title,full)
+            if best is None or cand[0]>best[0]:best=cand
+        if best and best[0]>=0.85:break
     return best
 
 def detail(title,url,current_price):
@@ -64,38 +88,32 @@ def detail(title,url,current_price):
 
 def candidate_pool():
     seen=set();out=[]
-    # merchant-linked products first
     for r in ls.list_products(100000):
-        t=(r.get('title') or '').strip();k=ar.key(t)
+        t=clean_title(r.get('title') or '');k=ar.key(t)
         if len(t)>=5 and k and k not in seen:seen.add(k);out.append({'title':t,'site':r.get('site') or '','url':r.get('url') or ''})
-    # then every title collected from Telegram/OnuAl/other archives
     for r in ar.list_title_candidates(100000):
-        t=(r.get('title') or '').strip();k=r.get('title_key') or ar.key(t)
+        t=clean_title(r.get('title') or '');k=ar.key(t)
         if len(t)>=5 and k and k not in seen:seen.add(k);out.append({'title':t,'site':r.get('site') or '','url':r.get('product_url') or ''})
     return out
 
 def main():
     rows=candidate_pool()
     if not rows:
-        print(f'=== AKAKÇE 24/7 ZENGİNLEŞTİRME V2 | aday=0 | limit/tur={LIMIT} ===');return
+        print(f'=== AKAKÇE 24/7 ZENGİNLEŞTİRME V3 | aday=0 | limit/tur={LIMIT} ===');return
     try:start=int(ar.cursor_get(CURSOR_KEY) or 0)
     except:start=0
     n=len(rows);done=stored=0
-    print(f'=== AKAKÇE 24/7 ZENGİNLEŞTİRME V2 | aday={n} | limit/tur={LIMIT} | başlangıç={start} ===')
+    print(f'=== AKAKÇE 24/7 ZENGİNLEŞTİRME V3 | aday={n} | limit/tur={LIMIT} | başlangıç={start} ===')
     for i in range(min(LIMIT,n)):
-        row=rows[(start+i)%n];title=row['title']
-        done+=1
+        row=rows[(start+i)%n];title=row['title'];done+=1
         try:
             hit=search(title)
             if not hit:
                 print(f'AKAKCE BULAMADI | {title[:70]}');time.sleep(SLEEP);continue
             sc,p,matched,url=hit;now,low,high=detail(title,url,p);dt=datetime.now(timezone.utc).isoformat()
-            if now and now>0:
-                ar.add(title,now,row.get('site') or '',None,'Akakce','comparison-current',url,dt);stored+=1
-            if low and low>0:
-                ar.add(title,low,row.get('site') or '',None,'Akakce','comparison-history-low',url,dt);stored+=1
-            if high and now and now*1.03<high<=now*3:
-                ar.add(title,high,row.get('site') or '',None,'Akakce','comparison-history-high',url,dt);stored+=1
+            if now and now>0:ar.add(title,now,row.get('site') or '',None,'Akakce','comparison-current',url,dt);stored+=1
+            if low and low>0:ar.add(title,low,row.get('site') or '',None,'Akakce','comparison-history-low',url,dt);stored+=1
+            if high and now and now*1.03<high<=now*3:ar.add(title,high,row.get('site') or '',None,'Akakce','comparison-history-high',url,dt);stored+=1
             prof=ar.save_profile(title)
             print(f'AKAKCE | skor={sc:.2f} | şimdi={now or 0:.2f} | 6ay_dip={low or 0:.2f} | yüksek={high or 0:.2f} | trend={prof.get("trend_ratio",1):.2f} | {title[:58]}')
         except Exception as e:print(f'AKAKCE HATA | {type(e).__name__}: {e}')
