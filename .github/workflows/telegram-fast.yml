@@ -2,7 +2,7 @@ name: Bahadir Telegram Kaynak Tarama
 
 # Telegram fırsatlarını 5 dakikada bir tarar.
 # Push ile hemen başlar; schedule ise runner herhangi bir nedenle sona ererse
-# yeni bir otomatik oturum başlatmak için 6 saatlik yedek tetikleyicidir.
+a# yeni bir otomatik oturum başlatmak için 6 saatlik yedek tetikleyicidir.
 on:
   workflow_dispatch:
   push:
@@ -57,6 +57,9 @@ jobs:
 
       - name: Telegram canlı fiyat fallback düzeltmesi
         run: python apply_telegram_safety_patch.py
+
+      - name: Telegram fotoğraf CDN düzeltmesi
+        run: python apply_telegram_photo_hardening.py
 
       - name: Telegram kaynak indirim eşiğini %10 yap
         run: sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_sources.py
