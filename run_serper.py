@@ -1,7 +1,11 @@
 import os,re,requests
 from datetime import datetime, timezone
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import urlparse, urlunparse, urlencode
 import bot
+
+# Kullanıcı SUPABASE_URL alanına yanlışlıkla /rest/v1 eklediyse düzelt.
+if bot.SUPABASE_URL.endswith('/rest/v1'):
+    bot.SUPABASE_URL = bot.SUPABASE_URL[:-8].rstrip('/')
 
 SERPER_API_KEY=os.environ['SERPER_API_KEY']
 AMAZON_TAG=os.environ.get('AMAZON_TAG','').strip()
@@ -12,12 +16,9 @@ QUERIES=[
     'oyuncu televizyon küçük ev aletleri indirim',
 ]
 TARGETS={
-    'amazon.com.tr':'Amazon',
-    'www.amazon.com.tr':'Amazon',
-    'hepsiburada.com':'Hepsiburada',
-    'www.hepsiburada.com':'Hepsiburada',
-    'trendyol.com':'Trendyol',
-    'www.trendyol.com':'Trendyol',
+    'amazon.com.tr':'Amazon','www.amazon.com.tr':'Amazon',
+    'hepsiburada.com':'Hepsiburada','www.hepsiburada.com':'Hepsiburada',
+    'trendyol.com':'Trendyol','www.trendyol.com':'Trendyol',
 }
 
 def parse_price(v):
@@ -36,12 +37,9 @@ def parse_price(v):
 
 def clean_link(link,site):
     if not link:return ''
-    p=urlparse(link)
-    host=p.netloc.lower()
-    q=[]
-    if site=='Amazon' and AMAZON_TAG:
-        q=[('tag',AMAZON_TAG)]
-    return urlunparse(('https',host,p.path.rstrip('/'),'','&'.join([]),'')) + (('?'+urlencode(q)) if q else '')
+    p=urlparse(link);host=p.netloc.lower();q=[]
+    if site=='Amazon' and AMAZON_TAG:q=[('tag',AMAZON_TAG)]
+    return urlunparse(('https',host,p.path.rstrip('/'),'','','')) + (('?'+urlencode(q)) if q else '')
 
 def canonical_for_db(link):
     p=urlparse(link)
@@ -55,8 +53,7 @@ def serper_shopping(query):
     return r.json().get('shopping') or []
 
 def site_from_item(item):
-    link=item.get('link') or ''
-    host=urlparse(link).netloc.lower()
+    link=item.get('link') or '';host=urlparse(link).netloc.lower()
     if host in TARGETS:return TARGETS[host]
     source=(item.get('source') or '').lower()
     if 'amazon' in source:return 'Amazon'
@@ -77,8 +74,7 @@ def process_item(item):
     now=datetime.now(timezone.utc).isoformat()
     try:
         rows=bot.sb('GET','products',params={'select':'*','product_url':f'eq.{db_url}','limit':'1'})
-        old=bot.history(db_url)
-        prev=old[0] if old else None
+        old=bot.history(db_url);prev=old[0] if old else None
         payload={'product_name':title,'current_price':current,'previous_price':prev,'product_url':db_url,'site':site,'updated_at':now}
         if rows:
             row=rows[0];bot.sb('PATCH',f'products?id=eq.{row["id"]}',json=payload)
@@ -99,8 +95,7 @@ def process_item(item):
         msg=(f'🔥 %{disc:.0f} İNDİRİM\n\n{title}\n\n💰 {current:,.2f} TL\n🏷️ Önce: {prev:,.2f} TL\n🛍️ {site}\n🔗 {link}')
         if image:
             rr=requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendPhoto',data={'chat_id':bot.CHANNEL_ID,'photo':image,'caption':msg[:1024]},timeout=12)
-            if not rr.ok:
-                rr=requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendMessage',json={'chat_id':bot.CHANNEL_ID,'text':msg},timeout=10)
+            if not rr.ok:rr=requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendMessage',json={'chat_id':bot.CHANNEL_ID,'text':msg},timeout=10)
         else:
             rr=requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendMessage',json={'chat_id':bot.CHANNEL_ID,'text':msg},timeout=10)
         print(f'Telegram HTTP: {rr.status_code}')
@@ -115,8 +110,7 @@ def main():
     seen=set();matched=0;sent=0
     for q in QUERIES:
         for item in serper_shopping(q):
-            site=site_from_item(item)
-            link=item.get('link') or ''
+            site=site_from_item(item);link=item.get('link') or ''
             key=(site,canonical_for_db(link)) if site and link else None
             if not key or key in seen:continue
             seen.add(key);matched+=1
