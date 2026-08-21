@@ -11,15 +11,18 @@ def _clean_name(value):
     return re.sub(r'\s+', ' ', value or 'Ürün').strip()[:300]
 
 
+def _valid_price(v):
+    return v is not None and 0 < v < 10000000
+
+
 def _first_price(page, selectors):
-    """Amazon'da ilk güvenilir CURRENT-price kaynağını seç; tüm fiyatları karıştırma."""
     for sel in selectors:
         try:
             loc = page.locator(sel)
-            for i in range(min(loc.count(), 10)):
+            for i in range(min(loc.count(), 15)):
                 raw = loc.nth(i).get_attribute('content') if sel.startswith('meta') else loc.nth(i).inner_text(timeout=500)
                 v = bot.price(raw)
-                if v is not None and 0 < v < 10000000:
+                if _valid_price(v):
                     return v
         except Exception:
             pass
@@ -27,45 +30,53 @@ def _first_price(page, selectors):
 
 
 def _amazon_price_values(page, html):
-    # Öncelik sırası önemli: strike/list fiyatları ve JSON-LD fiyatlarını current diye seçme.
-    current_selectors = [
+    selectors = [
+        '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
+        '#corePrice_feature_div .priceToPay .a-offscreen',
+        '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
         '#corePrice_feature_div .a-price .a-offscreen',
-        '#corePrice_feature_div .a-offscreen',
+        '#apex_desktop .priceToPay .a-offscreen',
+        '#apex_desktop .a-price .a-offscreen',
+        '.reinventPricePriceToPayMargin .a-offscreen',
         '.apexPriceToPay .a-offscreen',
+        '#price_inside_buybox', '#newBuyBoxPrice',
         '#priceblock_dealprice', '#priceblock_ourprice', '#priceblock_saleprice',
         'meta[property="product:price:amount"]', 'meta[itemprop="price"]',
     ]
-    v = _first_price(page, current_selectors)
-    if v is not None:
+    v = _first_price(page, selectors)
+    if _valid_price(v):
         return [v]
 
-    # Amazon'un dinamik JSON alanlarında yalnızca açıkça current olan fiyatları ara.
+    soup = BeautifulSoup(html or '', 'html.parser')
+    for tag in soup.select('input[name="items[0.base][customerVisiblePrice][amount]"], input[name*="customerVisiblePrice"][name*="amount"], input[name="displayedPrice"]'):
+        v = bot.price(tag.get('value'))
+        if _valid_price(v):
+            return [v]
+
     patterns = [
-        r'"priceToPay"\s*:\s*\{[^{}]{0,700}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"priceToPay"\s*:\s*\{.{0,1800}?"amount"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"priceToPay"\s*:\s*\{.{0,1800}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+        r'"customerVisiblePrice"\s*:\s*\{.{0,1200}?"amount"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
         r'"ourPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
         r'"currentPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
         r'"priceAmount"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
     ]
+    flat = (html or '').replace('\n', ' ')
     for pat in patterns:
-        m = re.search(pat, html or '', re.I)
+        m = re.search(pat, flat, re.I | re.S)
         if m:
-            x = bot.price(m.group(1))
-            if x is not None and 0 < x < 10000000:
-                return [x]
+            v = bot.price(m.group(1))
+            if _valid_price(v):
+                return [v]
 
-    # Son çare: whole+fraction çifti. Fraction tek başına ASLA fiyat kabul edilmez.
     try:
-        whole_loc = page.locator('.a-price-whole')
-        frac_loc = page.locator('.a-price-fraction')
+        whole_loc = page.locator('.priceToPay .a-price-whole, #corePrice_feature_div .a-price-whole, #apex_desktop .a-price-whole')
         for i in range(min(whole_loc.count(), 10)):
-            whole = whole_loc.nth(i).inner_text(timeout=500)
-            frac = frac_loc.nth(i).inner_text(timeout=500) if i < frac_loc.count() else '00'
-            whole_digits = re.sub(r'[^0-9]', '', whole)
-            frac_digits = re.sub(r'[^0-9]', '', frac)[:2].ljust(2, '0')
-            if whole_digits:
-                x = float(f'{whole_digits}.{frac_digits}')
-                if 0 < x < 10000000:
-                    return [x]
+            whole = re.sub(r'[^0-9]', '', whole_loc.nth(i).inner_text(timeout=500))
+            if whole:
+                v = float(whole)
+                if _valid_price(v):
+                    return [v]
     except Exception:
         pass
     return []
@@ -78,154 +89,85 @@ def _amazon_previous_prices(page, html, current):
             loc = page.locator(sel)
             for i in range(min(loc.count(), 10)):
                 v = bot.price(loc.nth(i).inner_text(timeout=500))
-                if v is not None and current * 1.03 < v < 10000000:
+                if _valid_price(v) and current * 1.03 < v:
                     values.append(v)
         except Exception:
             pass
-    for pat in [
-        r'"listPrice"\s*:\s*\{[^{}]{0,700}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
-        r'"basisPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
-        r'"wasPrice"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
-    ]:
-        for m in re.finditer(pat, html or '', re.I):
-            v = bot.price(m.group(1))
-            if v is not None and current * 1.03 < v < 10000000:
-                values.append(v)
     return list(dict.fromkeys(values))
 
 
 def _search_exact_amazon_price(query, asin):
-    """Arama motoru fiyatını ancak aynı sonuç bloğu exact ASIN'i ve Amazon ürün linkini içeriyorsa kabul et."""
-    engines = [
-        f'https://www.google.com/search?q={quote(query)}&num=10&filter=0',
-        f'https://www.bing.com/search?q={quote(query)}&count=10',
-        f'https://search.yahoo.com/search?p={quote(query)}&n=10',
-    ]
+    engines = [f'https://www.google.com/search?q={quote(query)}&num=10&filter=0', f'https://www.bing.com/search?q={quote(query)}&count=10']
     asin = (asin or '').upper()
     for url in engines:
         try:
             r = requests.get(url, headers=bot.HEADERS, timeout=12)
-            if r.status_code >= 400:
-                continue
+            if r.status_code >= 400: continue
             soup = BeautifulSoup(r.text, 'html.parser')
-            blocks = soup.select('li.b_algo, div.MjjYud, div.g, div.yuRUbf, div.result, article')
-            for block in blocks:
+            for block in soup.select('li.b_algo, div.MjjYud, div.g, article'):
                 text = block.get_text(' ', strip=True)
                 links = [a.get('href', '') for a in block.select('a[href]')]
                 blob = (text + ' ' + ' '.join(links)).upper()
-                if asin not in blob or 'AMAZON.COM.TR' not in blob:
-                    continue
-                vals = sorted(set(v for v in bot.prices(text) if 0 < v < 10000000))
-                if vals:
-                    print(f'Amazon exact ASIN arama fiyatı: {vals[:12]}')
-                    return vals[0], next((v for v in vals if v > vals[0] * 1.03), None)
-        except Exception:
-            pass
+                if asin not in blob or 'AMAZON.COM.TR' not in blob: continue
+                vals = sorted(set(v for v in bot.prices(text) if _valid_price(v)))
+                if vals: return vals[0], next((v for v in vals if v > vals[0] * 1.03), None)
+        except Exception: pass
     return None, None
 
 
 def _amazon_search_prices(url, title):
     m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
     asin = m.group(1) if m else None
-    queries = []
-    if asin:
-        queries += [f'site:amazon.com.tr {asin} TL', f'"{asin}" Amazon Türkiye fiyat']
-    if title and asin:
-        queries.append(f'site:amazon.com.tr "{title[:100]}" {asin}')
-    for qtext in queries:
-        cur, prev = _search_exact_amazon_price(qtext, asin)
-        if cur is not None:
-            return cur, prev
+    if not asin: return None, None
+    for q in [f'site:amazon.com.tr {asin} TL', f'"{asin}" Amazon Türkiye fiyat', f'site:amazon.com.tr "{title[:100]}" {asin}']:
+        cur, prev = _search_exact_amazon_price(q, asin)
+        if cur is not None: return cur, prev
     return None, None
 
 
-def _search_prices(query, domain=None):
-    engines = [
-        f'https://www.google.com/search?q={quote(query)}&num=10&filter=0',
-        f'https://www.bing.com/search?q={quote(query)}&count=10',
-        f'https://search.yahoo.com/search?p={quote(query)}&n=10',
-    ]
-    for url in engines:
-        try:
-            r = requests.get(url, headers=bot.HEADERS, timeout=12)
-            if r.status_code >= 400:
-                continue
-            soup = BeautifulSoup(r.text, 'html.parser')
-            text = soup.get_text(' ', strip=True)
-            if domain and domain.lower() not in text.lower():
-                continue
-            vals = sorted(set(bot.prices(text)))
-            if vals:
-                return vals
-        except Exception:
-            pass
-    return []
-
-
-def _akakce_market_reference(url, title, current):
-    """Akakçe yalnızca piyasa/geçmiş fiyat referansıdır; Amazon güncel fiyatı yerine kullanılmaz."""
-    m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{8,})', url or '')
-    queries = []
-    if m:
-        queries.append(f'site:akakce.com {m.group(1)}')
-    if title:
-        queries.append(f'site:akakce.com "{title[:100]}"')
-    candidates = []
-    for q in queries:
-        vals = _search_prices(q, 'akakce.com')
-        if vals:
-            candidates.extend(vals)
-    candidates = sorted(set(v for v in candidates if v > current * 1.03))
-    if candidates:
-        print(f'Akakçe piyasa/geçmiş referansı: {candidates[:10]}')
-        return min(candidates)
-    return None
-
-
-def _jsonld_product_name(html):
+def _jsonld_product(html):
     try:
-        name, _ = bot.jsonld_all(html)
-        return name
+        name, vals = bot.jsonld_all(html)
+        vals = [v for v in vals if _valid_price(v)]
+        return name, vals
     except Exception:
-        return None
+        return None, []
 
 
 def product_page(site, url, title, browser, search_ps=None):
-    if site != 'Amazon':
-        return _original_product_page(site, url, title, browser, search_ps)
-    page = browser.new_page()
-    page.set_default_timeout(5000)
-    page.set_default_navigation_timeout(15000)
+    if site != 'Amazon': return _original_product_page(site, url, title, browser, search_ps)
+    page = browser.new_page(locale='tr-TR')
+    page.set_default_timeout(6000); page.set_default_navigation_timeout(20000)
     try:
         r = page.goto(url, wait_until='domcontentloaded')
         status = r.status if r else 0
         print(f'{site} ürün HTTP: {status} | {url}')
         if r and status < 400:
-            page.wait_for_timeout(1800)
+            page.wait_for_timeout(2500)
             html = page.content()
             current = _amazon_price_values(page, html)
+            jd_name, jd_vals = _jsonld_product(html)
+            if not current and jd_vals:
+                current = [min(jd_vals)]
+                print(f'{site} JSON-LD fiyatı kullanıldı: {current[0]:.2f}')
             if current:
                 cur = current[0]
                 previous = _amazon_previous_prices(page, html, cur)
                 prev = min(previous) if previous else None
-                name = _jsonld_product_name(html) or title or 'Ürün'
+                name = jd_name or title or 'Ürün'
                 try:
                     og = page.locator('meta[property="og:title"]').get_attribute('content')
-                    if og:
-                        name = og
-                except Exception:
-                    pass
+                    if og: name = og
+                except Exception: pass
                 print(f'{site} güvenilir güncel fiyat: {cur:.2f}')
-                print(f'{site} sayfa referansı: {prev or 0:.2f}')
                 return {'name': _clean_name(name), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
-
+            try:
+                body = page.locator('body').inner_text(timeout=3000)
+                print(f'{site} fiyat debug: {body[:220].replace(chr(10), " ")}')
+            except Exception: pass
         print(f'{site} DOM/HTML fiyatı bulunamadı; exact ASIN araması deneniyor | {url}')
         cur, prev = _amazon_search_prices(url, title)
         if cur:
-            # Akakçe yalnızca piyasa/geçmiş referansıdır; Amazon current price olarak asla kullanılmaz.
-            ak_prev = _akakce_market_reference(url, title, cur)
-            if ak_prev and (prev is None or ak_prev > prev):
-                prev = ak_prev
             return {'name': _clean_name(title), 'price': cur, 'previous': prev, 'url': bot.canonical(url), 'site': site}
         print(f'{site} güvenilir güncel fiyat bulunamadı | {url}')
         return None
@@ -237,44 +179,25 @@ def product_page(site, url, title, browser, search_ps=None):
 
 
 def process_with_real_history(p):
-    """İndirim bazını Amazon liste fiyatından değil, botun gerçek gözlem geçmişinden al."""
     try:
         rows = bot.sb('GET', 'products', params={'select': '*', 'product_url': f'eq.{p["url"]}', 'limit': '1'})
-        now = bot.datetime.now(bot.timezone.utc).isoformat()
-        old = bot.history(p['url'])
-        previous_observed = old[0] if old else None
-        if previous_observed is None:
-            print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | önceki gözlem yok -> paylaşılmadı')
-        else:
-            print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | son gözlenen={previous_observed:.2f} | geçmiş={len(old)}')
-
-        payload = {
-            'product_name': p['name'], 'current_price': p['price'],
-            'previous_price': previous_observed, 'product_url': p['url'],
-            'site': p['site'], 'updated_at': now,
-        }
+        now = bot.datetime.now(bot.timezone.utc).isoformat(); old = bot.history(p['url']); previous_observed = old[0] if old else None
+        print(f'Kontrol: {p["site"]} | mevcut={p["price"]:.2f} | son gözlenen={previous_observed or 0:.2f} | geçmiş={len(old)}')
+        payload = {'product_name': p['name'], 'current_price': p['price'], 'previous_price': previous_observed, 'product_url': p['url'], 'site': p['site'], 'updated_at': now}
         if rows:
-            row = rows[0]
-            bot.sb('PATCH', f'products?id=eq.{row["id"]}', json=payload)
+            row = rows[0]; bot.sb('PATCH', f'products?id=eq.{row["id"]}', json=payload)
         else:
             row = (bot.sb('POST', 'products', json=payload) or [payload])[0]
-
         bot.sb('POST', 'price_history', json={'price': p['price'], 'product_url': p['url'], 'site': p['site'], 'recorded_at': now})
-        if previous_observed is None or previous_observed <= p['price']:
-            return False
+        if previous_observed is None or previous_observed <= p['price']: return False
         disc = (previous_observed - p['price']) / previous_observed * 100
-        if disc < bot.MIN_DISCOUNT:
-            return False
+        if disc < bot.MIN_DISCOUNT: return False
         last = row.get('last_posted_at') if isinstance(row, dict) else None
         if last:
             try:
-                if bot.datetime.now(bot.timezone.utc) - bot.datetime.fromisoformat(last.replace('Z', '+00:00')) < bot.timedelta(hours=bot.COOLDOWN):
-                    return False
-            except Exception:
-                pass
-        msg = (f'🔥 %{disc:.0f} İNDİRİM\n\n{p["name"]}\n\n'
-               f'💰 {p["price"]:,.2f} TL\n🏷️ Önce: {previous_observed:,.2f} TL\n'
-               f'🛍️ {p["site"]}\n🔗 {p["url"]}')
+                if bot.datetime.now(bot.timezone.utc) - bot.datetime.fromisoformat(last.replace('Z', '+00:00')) < bot.timedelta(hours=bot.COOLDOWN): return False
+            except Exception: pass
+        msg = f'🔥 %{disc:.0f} İNDİRİM\n\n{p["name"]}\n\n💰 {p["price"]:,.2f} TL\n🏷️ Önce: {previous_observed:,.2f} TL\n🛍️ {p["site"]}\n🔗 {p["url"]}'
         r = requests.post(f'https://api.telegram.org/bot{bot.TOKEN}/sendMessage', json={'chat_id': bot.CHANNEL_ID, 'text': msg}, timeout=8)
         print(f'Telegram gönderim HTTP: {r.status_code} | {r.text[:200]}')
         if r.ok and isinstance(row, dict) and row.get('id'):
@@ -282,7 +205,7 @@ def process_with_real_history(p):
         return r.ok
     except Exception as e:
         print(f'işlem hata: {type(e).__name__}: {e}')
-    return False
+        return False
 
 
 bot.product_page = product_page
