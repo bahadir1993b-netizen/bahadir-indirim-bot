@@ -7,11 +7,13 @@ services:
       - .env
     environment:
       SCAN_INTERVAL: ${SCAN_INTERVAL:-1800}
-      DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-70}
-      DIRECT_HISTORY_DAYS: ${DIRECT_HISTORY_DAYS:-90}
+      DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-100}
+      DIRECT_HISTORY_DAYS: ${DIRECT_HISTORY_DAYS:-365}
       DIRECT_HISTORY_WRITE_HOURS: ${DIRECT_HISTORY_WRITE_HOURS:-6}
-      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-25}
+      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-20}
+      DIRECT_FRESH_SOURCE_HOURS: ${DIRECT_FRESH_SOURCE_HOURS:-4}
       DIRECT_COOLDOWN_HOURS: ${DIRECT_COOLDOWN_HOURS:-12}
+      LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
     volumes:
@@ -28,10 +30,31 @@ services:
     environment:
       TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-60}
       TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-180}
+      LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
+    volumes:
+      - ./data:/app/data
     command: >-
       sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
+
+  history-harvester:
+    build: .
+    container_name: bahadir-history-harvester
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+      HARVEST_INTERVAL: ${HARVEST_INTERVAL:-21600}
+      HARVEST_PAGES_PER_RUN: ${HARVEST_PAGES_PER_RUN:-8}
+      HARVEST_MAX_BLOCKS: ${HARVEST_MAX_BLOCKS:-400}
+      SERPER_DISABLED: "1"
+      SERPER_API_KEY: ""
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_history_harvester.py; code=$$?; echo "Geçmiş fiyat hasadı bitti (kod=$$code). ${HARVEST_INTERVAL:-21600} sn sonra tekrar."; sleep ${HARVEST_INTERVAL:-21600}; done'
 
   health:
     build: .
