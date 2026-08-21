@@ -80,19 +80,18 @@ jobs:
             cycle_start=$SECONDS
             echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
-            # Amazon koduna dokunmadan Hepsiburada + Trendyol için ayrı keşif katmanı.
+            # Hepsiburada + Trendyol tek başına bu motorda çalışır.
             # İlk gözlemde arama kartındaki eski fiyat kesinlikle referans alınmaz.
-            python apply_historical_reference_guard.py
-            timeout 180s python marketplace_nonamazon_scanner.py || echo "Hepsiburada/Trendyol taraması bu turda hata verdi; mevcut marketplace taramasına geçiliyor."
+            timeout 180s python marketplace_nonamazon_scanner.py || echo "Hepsiburada/Trendyol taraması bu turda hata verdi; Amazon taramasına geçiliyor."
 
-            # Mevcut marketplace motoru korunuyor. Yalnızca bağımsız keşifte
-            # 'önceki fiyat' artık geçmişte gerçekten görülmüş fiyat olmak zorunda.
+            # Amazon motorunu mevcut haliyle koruyoruz. HB/Trendyol burada
+            # çalıştırılmadığı için aynı ürün iki farklı motor tarafından gönderilemez.
+            python apply_amazon_only_marketplace_runtime.py
             sed -i 's/MIN_DISCOUNT = 10.0/MIN_DISCOUNT = 15.0/' marketplace_scanner.py
             python apply_scanner_runtime_patch.py
             python apply_marketplace_rescue_patch.py
             python apply_final_price_guard.py
-            python apply_historical_reference_guard.py
-            timeout 420s python marketplace_scanner.py || echo "Mevcut marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
+            timeout 420s python marketplace_scanner.py || echo "Amazon marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
 
             remaining=$((end - SECONDS))
             if [ "$remaining" -le 0 ]; then break; fi
