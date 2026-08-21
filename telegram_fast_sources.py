@@ -5,7 +5,7 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from bs4 import BeautifulSoup
 
 TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; SB=os.environ['SUPABASE_URL'].rstrip('/'); KEY=os.environ['SUPABASE_SERVICE_KEY']; CHAT='-1004424116637'
-MAX_AGE=45; MIN_DISCOUNT=6.0; AMAZON_TAG=os.getenv('AMAZON_ASSOCIATE_TAG','').strip()
+MAX_AGE=45; MIN_DISCOUNT=15.0; AMAZON_TAG=os.getenv('AMAZON_ASSOCIATE_TAG','').strip()
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
 SOURCES={'OnuAl':'onual_firsat','EnesOzen':'enesozen','OzelFirsatlar':'ozelfirsat','AmazonOzel':'amazonozel','FirsatZ':'firsatz','FirsatMerkezi':'firsatmerkez','IndirimDeal':'indirimdeal'}
 MARKET={'amazon.com.tr':'Amazon','hepsiburada.com':'Hepsiburada','trendyol.com':'Trendyol'}
@@ -83,18 +83,29 @@ def duplicate_product(s,t,c):
 def source_image(b):
  w=b.select_one('.tgme_widget_message_photo_wrap')
  if w:
-  m=re.search(r"url\(['\"]?([^'\")]+)",w.get('style',''))
+  st=w.get('style',''); m=re.search(r"url\(['\"]?([^'\")]+)",st)
   if m:return clean(m.group(1))
+  href=clean(w.get('href') or '')
+  if href:
+   try:
+    r=requests.get(href,headers={**HEAD,'Referer':'https://t.me/'},timeout=8)
+    if r.ok:
+     soup=BeautifulSoup(r.text,'html.parser')
+     for sel in ['meta[property="og:image"]','meta[name="twitter:image"]']:
+      el=soup.select_one(sel)
+      if el and el.get('content'):return clean(el.get('content'))
+     m=re.search(r'https://cdn\d+\.telesco\.pe/file/[^\"\'<> )]+',r.text)
+     if m:return m.group(0)
+   except:pass
  im=b.select_one('.tgme_widget_message_photo img, .tgme_widget_message_photo_wrap img')
  return clean(im.get('src') or im.get('data-src') or '') if im else None
 def send_photo_or_text(text,u,image,source,post_id):
  markup={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
  if image:
   try:
-   ir=requests.get(image,headers=HEAD,timeout=8)
+   ir=requests.get(image,headers={**HEAD,'Referer':'https://t.me/'},timeout=8)
    if ir.ok and len(ir.content)>1000:
-    requests.post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',data={'chat_id':CHAT,'caption':text[:1024],'reply_markup':json.dumps(markup,ensure_ascii=False)},files={'photo':('source.jpg',ir.content,'image/jpeg')},timeout=15).raise_for_status()
-    print(f'GÖRSEL GÖNDERİLDİ | {source}:{post_id}');return
+    requests.post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',data={'chat_id':CHAT,'caption':text[:1024],'reply_markup':json.dumps(markup,ensure_ascii=False)},files={'photo':('source.jpg',ir.content,'image/jpeg')},timeout=15).raise_for_status(); print(f'GÖRSEL GÖNDERİLDİ | {source}:{post_id}');return
   except Exception as e:print(f'GÖRSEL HATA | {source}:{post_id} | {type(e).__name__}: {e}')
  requests.post('https://api.telegram.org/bot'+TOKEN+'/sendMessage',json={'chat_id':CHAT,'text':text,'disable_web_page_preview':False,'reply_markup':markup},timeout=10).raise_for_status()
 def process(source,b):
@@ -102,8 +113,7 @@ def process(source,b):
  if not tx:return False
  raw=tx.get_text(' ',strip=True);post_id=(b.get('data-post') or '').split('/')[-1];key=f'{source}:{post_id}'
  if not post_id or seen(key):return False
- links=[clean(a.get('href') or '') for a in b.select('a[href]')]
- s=next((site(x) for x in links if site(x)),None) or next((x for x in MARKET.values() if re.search(r'\b'+re.escape(x)+r'\b',raw,re.I)),None)
+ links=[clean(a.get('href') or '') for a in b.select('a[href]')]; s=next((site(x) for x in links if site(x)),None) or next((x for x in MARKET.values() if re.search(r'\b'+re.escape(x)+r'\b',raw,re.I)),None)
  if not s:return False
  p=prices(raw)
  if not p:return False
@@ -118,16 +128,11 @@ def process(source,b):
    if u:break
  if not u:return False
  t=title(raw)
- if duplicate_product(s,t,c):
-  print(f'ATLANDI | {s} | aynı ürün yakın zamanda paylaşıldı | {c:.2f} TL');remember(key);return False
+ if duplicate_product(s,t,c):remember(key);return False
  lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else '🔥 FIRSAT','',f'🛍️ {t}',f'💰 {c:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.')]
  if old and old>c:lines.append(f'🏷️ Önceki: {old:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.'))
- lines+=['','👇 Fırsata git']; text='\n'.join(lines)
- try:
-  send_photo_or_text(text,u,source_image(b),source,post_id); remember(key)
-  try:sb('POST','price_history',json={'price':c,'product_url':f'telegram-product://{s}:{re.sub(r"[^a-z0-9]+","-",t.lower()).strip("-")[:160]}','site':s,'recorded_at':datetime.now(timezone.utc).isoformat()})
-  except:pass
-  print(f'⚡ HIZLI GÖNDERİLDİ | {s} | {t} | {c:.2f} TL');return True
+ text='\n'.join(lines+['','👇 Fırsata git'])
+ try:send_photo_or_text(text,u,source_image(b),source,post_id); remember(key); print(f'⚡ HIZLI GÖNDERİLDİ | {s} | {t} | {c:.2f} TL');return True
  except Exception as e:print(f'HIZLI GÖNDERİ HATA | {source}:{post_id} | {type(e).__name__}: {e}');return False
 def main():
  print('=== HIZLI TELEGRAM KAYNAK TARAMASI: önce kanallar ===');fetched=[]
