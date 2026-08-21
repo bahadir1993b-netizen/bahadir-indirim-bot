@@ -9,12 +9,10 @@ if sb.endswith('/rest/v1'):
     sb=sb[:-8].rstrip('/'); os.environ['SUPABASE_URL']=sb
 
 import telegram_sources as ts
-try:
-    from price_reference import market_reference
-except Exception:
-    market_reference=lambda site,title,current:(None,'unavailable')
+from price_reference import market_snapshot
+from deal_validation import inspect_page,choose_reference
 
-ts.MIN_DISCOUNT=15.0
+ts.MIN_DISCOUNT=float(os.environ.get('MIN_DISCOUNT','15'))
 ts.MAX_AGE=max(30,int(os.environ.get('TELEGRAM_MAX_AGE','180')))
 ts.AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
 
@@ -23,54 +21,52 @@ def clean_title(raw):
     pos=len(text)
     for pat in [r'\s[💰🏷️]\s*',r'\s(?:\d[\d.,]*)\s*(?:TL|₺)\b',r'\s(?:sepette|kampanya|kupon|kod(?:u)?|fırsata git|firsata git)\b']:
         m=re.search(pat,text,re.I)
-        if m: pos=min(pos,m.start())
+        if m:pos=min(pos,m.start())
     text=text[:pos]
     text=re.sub(r'@[A-Za-z0-9_]+',' ',text)
     text=re.sub(r'#(?:tanıtım|tanitim|reklam)\b',' ',text,flags=re.I)
     text=re.sub(r'(?i)\b(?:sohbet grubumuz(?: için)?|kanalımıza katıl|kanalımıza katilin|takip et|reklam)\b.*$',' ',text)
     text=re.sub(r'[🔥✅🔻🔗👉👇📣🛍️🎯🎁]+',' ',text)
     text=re.sub(r'\s+',' ',text).strip(' -|•')
-    return text[:180] if len(text)>=4 else 'Fırsat Ürünü'
+    return text[:200] if len(text)>=4 else 'Fırsat Ürünü'
 ts.extract_title=clean_title
 
 def _photo_from_html(body):
     soup=BeautifulSoup(body,'html.parser')
     for el in soup.select('.tgme_widget_message_photo_wrap,.tgme_widget_message_photo'):
         m=re.search(r"background-image\s*:\s*url\(['\"]?([^'\")]+)",html.unescape(el.get('style') or ''),re.I)
-        if m and m.group(1).startswith('http'): return m.group(1)
+        if m and m.group(1).startswith('http'):return m.group(1)
     for sel,attr in [('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('img[itemprop="image"]','src'),('.tgme_widget_message_photo img','src')]:
         el=soup.select_one(sel)
         if el:
             u=html.unescape(el.get(attr) or '')
-            if u.startswith('http'): return u
+            if u.startswith('http'):return u
     return None
 
-def source_photo(source,post_id,product_url=None):
-    channel=ts.SOURCES.get(source)
-    urls=[]
-    if channel and post_id: urls += [f'https://t.me/{channel}/{post_id}?embed=1&mode=tme',f'https://t.me/s/{channel}/{post_id}']
-    if product_url: urls.append(product_url)
+def source_photo(source,post_id,product_url=None,page_image=None):
+    if page_image:return page_image
+    channel=ts.SOURCES.get(source);urls=[]
+    if channel and post_id:urls += [f'https://t.me/{channel}/{post_id}?embed=1&mode=tme',f'https://t.me/s/{channel}/{post_id}']
+    if product_url:urls.append(product_url)
     for url in urls:
         try:
             r=requests.get(url,headers=ts.HEAD,timeout=9,allow_redirects=True)
             if r.ok:
                 p=_photo_from_html(r.text)
                 if p:return p
-        except Exception: pass
+        except Exception:pass
     return None
 
-def fmt(x): return f'{x:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
+def fmt(x):return f'{x:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
 
-def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None):
-    if not ts.valid(s,u): print(f'ATLANDI | {source}:{post_id} | geçersiz link'); return False
+def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None,campaign=None,page_image=None,ref_source=''):
+    if not ts.valid(s,u):print(f'ATLANDI | {source}:{post_id} | geçersiz link');return False
     key=f'{source}:{post_id}'
     if ts.seen(key):return False
     disc=(p-c)/p*100 if p and p>c else None
     if disc is not None and disc<ts.MIN_DISCOUNT:
         print(f'ATLANDI | {source}:{post_id} | %{disc:.1f} < %{ts.MIN_DISCOUNT}');ts.remember(key);return False
-    if disc is None and not coupon and not ts.DEAL_WORDS.search(signal or ''):
-        print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok');ts.remember(key);return False
-    row=ts.save(s,u,t,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None
+    row=ts.save(s,u,t,c,p);last=row.get('last_posted_at') if isinstance(row,dict) else None
     if last:
         try:
             if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=ts.COOLDOWN):
@@ -78,42 +74,68 @@ def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None):
         except Exception:pass
     title=clean_title(t)
     lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else ('🎟️ KUPONLU FIRSAT' if coupon else '🔥 FIRSAT'),' ',f'🛍️ {html.escape(title)}',f'💰 {fmt(c)} TL']
-    if p and p>c:lines.append(f'🏷️ Önceki: {fmt(p)} TL')
+    if p and p>c:
+        label='Normal fiyat' if campaign else 'Referans fiyat'
+        lines.append(f'🏷️ {label}: {fmt(p)} TL')
+    if campaign:
+        lines.append(f'🎯 Kampanya: {html.escape(campaign.get("label") or "Kampanyalı alım")}')
+        if campaign.get('qty'):lines.append(f'📦 {campaign["qty"]} adet alımda geçerli')
     if coupon:lines.append(f'🎟️ Kupon: {html.escape(coupon)}')
     lines += ['',f'👇 <a href="{html.escape(u,quote=True)}"><b>Fırsata git</b></a>']
-    text='\n'.join(lines); keyboard={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
-    photo=source_photo(source,post_id,u); rr=None
+    text='\n'.join(lines);keyboard={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
+    photo=source_photo(source,post_id,u,page_image);rr=None
     if photo:
         rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendPhoto',data={'chat_id':ts.CHAT,'photo':photo,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(keyboard,ensure_ascii=False)},timeout=18)
-        if rr.ok:print(f'GÖRSELLİ GÖNDERİLDİ | {s} | {c:.2f} TL | foto=var')
     if not rr or not rr.ok:
-        if photo:print(f'Fotoğraf gönderilemedi | HTTP={rr.status_code if rr else "?"}; link önizlemeli mesaja geçiliyor')
         rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendMessage',json={'chat_id':ts.CHAT,'text':text,'parse_mode':'HTML','disable_web_page_preview':False,'reply_markup':keyboard},timeout=18)
     rr.raise_for_status()
     if isinstance(row,dict) and row.get('id'):ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
-    ts.remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL'+(f' | %{disc:.1f}' if disc is not None else '')+f' | foto={"var" if photo else "yok"}');return True
+    ts.remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL | ref={p or 0:.2f} | kaynak={ref_source} | kampanya={campaign.get("label") if campaign else "yok"} | foto={"var" if photo else "yok"}');return True
 
 def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
-    t=clean_title(t); signal_clean=re.sub(r'@[A-Za-z0-9_]+',' ',signal or '')
+    key=f'{source}:{post_id}'
+    if ts.seen(key):return False
+    t=clean_title(t);signal_clean=re.sub(r'@[A-Za-z0-9_]+',' ',signal or '')
     signal_clean=re.sub(r'(?i)\bsohbet grubumuz(?: için)?\b.*',' ',signal_clean)
     signal_clean=re.sub(r'(?i)\b(?:kanalımıza katıl|takip et|reklam)\b.*',' ',signal_clean)
-    if not p or p<=c:
-        try:
-            ref,ref_source=market_reference(s,t,c)
-            if ref and ref>c:
-                p=ref;print(f'REFERANS BULUNDU | {source}:{post_id} | {ref_source} | {c:.2f}->{p:.2f}')
-            else:print(f'REFERANS YOK | {source}:{post_id} | {ref_source}')
-        except Exception as e:print(f'REFERANS HATA | {source}:{post_id} | {type(e).__name__}')
-    if p and p>c:
-        disc=(p-c)/p*100
-        if disc>=ts.MIN_DISCOUNT:return send_clean(s,u,t,c,p,source,post_id,signal_clean,coupon)
-        ts.remember(f'{source}:{post_id}');print(f'ATLANDI | {source}:{post_id} | kesin indirim %{disc:.1f} < %{ts.MIN_DISCOUNT}');return False
-    m=re.search(r'\b(\d+)\s*al\s*(\d+)\s*(?:öde|ode)\b',signal_clean,re.I)
-    if m:
-        buy,paid=int(m.group(1)),int(m.group(2))
-        if buy>paid>0 and (buy-paid)/buy*100>=ts.MIN_DISCOUNT:return send_clean(s,u,t,c*(paid/buy),c,source,post_id,signal_clean,coupon)
-    if re.search(r'\b\d+\s*adet\s*(?:alımda|alimda)\s*geçerli\b',signal_clean,re.I):return send_clean(s,u,t,c,None,source,post_id,signal_clean+' kampanya',coupon)
-    ts.remember(f'{source}:{post_id}');print(f'ATLANDI | {source}:{post_id} | %15+ doğrulanabilir indirim yok');return False
+    pg=inspect_page(u,c)
+    if pg.get('available') is False:
+        print(f'ATLANDI | {source}:{post_id} | stokta yok');ts.remember(key);return False
+    if pg.get('title') and len(pg['title'])>len(t)*0.8:t=clean_title(pg['title'])
+    campaign=pg.get('campaign')
+    live=pg.get('live')
+    # A source may publish an effective campaign unit price. Keep it only when the page campaign mathematically explains it.
+    if campaign and campaign.get('effective'):
+        eff=float(campaign['effective'])
+        if abs(c-eff)/max(eff,1)<=0.08:
+            current=eff
+        elif live:
+            current=live
+        else:current=c
+    elif live:
+        current=live if abs(live-c)/max(live,1)>0.03 else c
+    else:current=c
+    try:
+        floor,med,n,msrc=market_snapshot(t)
+    except Exception:
+        floor=med=None;n=0;msrc='market-error'
+    # For campaign deals the normal page price is a useful, honest baseline.
+    page_ref=(live if campaign and live and live>current else pg.get('old'))
+    ref,ref_source=choose_reference(current,history=None,source=p,page=page_ref,market_median=med,market_floor=floor)
+    print(f'DOĞRULAMA | {source}:{post_id} | kaynak_fiyat={c:.2f} canlı={live or 0:.2f} efektif={campaign.get("effective") if campaign else 0} piyasa={med or 0:.2f} kaynak_ref={p or 0:.2f} seçilen_ref={ref or 0:.2f} | {ref_source}')
+    if not ref or ref<=current:
+        # Explicit multi-buy can still be a deal if the normal page price proves it.
+        m=re.search(r'\b(\d+)\s*al\s*(\d+)\s*(?:öde|ode)\b',signal_clean,re.I)
+        if m and live:
+            buy,paid=int(m.group(1)),int(m.group(2))
+            if buy>paid>0:
+                current=live*paid/buy;ref=live;campaign={'label':f'{buy} al {paid} öde','qty':buy,'effective':current};ref_source='page-campaign'
+    if not ref or ref<=current:
+        print(f'ATLANDI | {source}:{post_id} | güvenilir referans yok');ts.remember(key);return False
+    disc=(ref-current)/ref*100
+    if disc<ts.MIN_DISCOUNT:
+        print(f'ATLANDI | {source}:{post_id} | doğrulanmış indirim %{disc:.1f}');ts.remember(key);return False
+    return send_clean(s,u,t,current,ref,source,post_id,signal_clean,coupon,campaign,pg.get('image'),ref_source)
 ts.send=strict_send
 
 HEAD=dict(ts.HEAD);HEAD.update({'Cache-Control':'no-cache, no-store, max-age=0','Pragma':'no-cache'})
@@ -123,13 +145,13 @@ def fetch_source(item):
     except Exception as e:print(f'Telegram kaynak hata {source}: {type(e).__name__}: {e}');return source,None
 
 def realtime_main():
-    print(f'=== Telegram gerçek-zamanlı tarama | eşik=%15 | yaş={ts.MAX_AGE} dk ===');fetched=[]
+    print(f'=== Telegram gerçek-zamanlı tarama | eşik=%{ts.MIN_DISCOUNT:g} | yaş={ts.MAX_AGE} dk ===');fetched=[]
     with ThreadPoolExecutor(max_workers=len(ts.SOURCES)) as ex:
         for f in as_completed([ex.submit(fetch_source,x) for x in ts.SOURCES.items()]):
             source,r=f.result();blocks=[];newest_age=None
             if r and r.status_code<400:
                 now=datetime.now(timezone.utc);all_blocks=BeautifulSoup(r.text,'html.parser').select('.tgme_widget_message')
-                for b in all_blocks[-12:]:
+                for b in all_blocks[-15:]:
                     tm=b.select_one('time[datetime]');tx=b.select_one('.tgme_widget_message_text')
                     if not tm or not tx:continue
                     try:dt=datetime.fromisoformat(tm['datetime'].replace('Z','+00:00'))
