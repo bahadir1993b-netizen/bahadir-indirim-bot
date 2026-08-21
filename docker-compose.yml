@@ -8,7 +8,7 @@ services:
     environment:
       SCAN_INTERVAL: ${SCAN_INTERVAL:-600}
       DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-160}
-      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-32}
+      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-48}
       DIRECT_FRESH_SOURCE_HOURS: ${DIRECT_FRESH_SOURCE_HOURS:-4}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_DISABLED: "1"
@@ -45,6 +45,7 @@ services:
       LOCAL_PRICE_DB: /app/data/price_memory.db
       PRICE_SAMPLE_INTERVAL: ${PRICE_SAMPLE_INTERVAL:-300}
       PRICE_SAMPLE_LIMIT: ${PRICE_SAMPLE_LIMIT:-450}
+      PRICE_SAMPLE_BROWSER_LIMIT: ${PRICE_SAMPLE_BROWSER_LIMIT:-80}
       PRICE_SAMPLE_SLEEP: ${PRICE_SAMPLE_SLEEP:-0.10}
       PRICE_SAMPLE_DEAL_PCT: ${PRICE_SAMPLE_DEAL_PCT:-15}
       SERPER_DISABLED: "1"
@@ -127,12 +128,12 @@ services:
       - .env
     environment:
       LOCAL_PRICE_DB: /app/data/price_memory.db
-      SERPER_SEED_INTERVAL: ${SERPER_SEED_INTERVAL:-3600}
-      SERPER_SEED_QUERIES: ${SERPER_SEED_QUERIES:-18}
+      SERPER_SEED_INTERVAL: ${SERPER_SEED_INTERVAL:-21600}
+      SERPER_SEED_QUERIES: ${SERPER_SEED_QUERIES:-12}
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_serper_seed.py; code=$$?; echo "Serper seed turu bitti (kod=$$code). ${SERPER_SEED_INTERVAL:-3600} sn sonra tekrar."; sleep ${SERPER_SEED_INTERVAL:-3600}; done'
+      sh -c 'while true; do python run_serper_seed.py; code=$$?; echo "Serper seed turu bitti (kod=$$code). ${SERPER_SEED_INTERVAL:-21600} sn sonra tekrar."; sleep ${SERPER_SEED_INTERVAL:-21600}; done'
 
   health:
     build: .
