@@ -35,14 +35,12 @@ def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
                 effective=c*(paid/buy)
                 return _original_send(s,u,t,effective,c,source,post_id,signal,coupon)
 
-    # Açık yüzde kampanyası varsa oranı kontrol et; fiyatın gerçekten indirime çevrilebildiği durumlar
-    # telegram_sources.process içinde zaten p/c olarak hesaplanır. Buraya p gelmediyse güvenilir sayma.
     try: ts.remember(f'{source}:{post_id}')
     except Exception: pass
-    print(f'ATLANDI | {source}:{post_id} | %%15+ doğrulanabilir indirim yok')
+    print(f'ATLANDI | {source}:{post_id} | %15+ doğrulanabilir indirim yok')
     return False
 
 ts.send=strict_send
 
-print('=== Telegram gerçek-zamanlı tarama | eşik=%15 | yaş=%s dk ===' % ts.MAX_AGE)
+print(f'=== Telegram gerçek-zamanlı tarama | eşik=%15 | yaş={ts.MAX_AGE} dk ===')
 ts.main()
