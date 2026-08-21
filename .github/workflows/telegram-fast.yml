@@ -1,8 +1,6 @@
 name: Bahadir Telegram Kaynak Tarama
 
 # Telegram fırsatlarını 5 dakikada bir tarar.
-# Push ile hemen başlar; schedule ise runner herhangi bir nedenle sona ererse
-# yeni bir otomatik oturum başlatmak için 6 saatlik yedek tetikleyicidir.
 on:
   workflow_dispatch:
   push:
@@ -30,6 +28,9 @@ jobs:
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
 
+      - name: Hızlı Telegram fotoğraf patchi
+        run: python apply_fast_photo_hardening.py
+
       - name: ⚡ İlk Telegram kaynak taraması
         timeout-minutes: 3
         env:
@@ -39,8 +40,8 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
           set -u
-          sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_fast_sources.py
-          echo "=== ÖNCELİK: Telegram kaynakları | minimum indirim %10 ==="
+          sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=15.0/' telegram_fast_sources.py
+          echo "=== ÖNCELİK: Telegram kaynakları | minimum indirim %15 ==="
           timeout 120s python telegram_fast_sources.py || echo "İlk hızlı Telegram taraması hata verdi; devam ediliyor."
 
       - name: Chromium kur
@@ -61,8 +62,10 @@ jobs:
       - name: Telegram fotoğraf CDN düzeltmesi
         run: python apply_telegram_photo_hardening.py
 
-      - name: Telegram kaynak indirim eşiğini %10 yap
-        run: sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_sources.py
+      - name: Telegram kaynak indirim eşiğini %15 yap
+        run: |
+          sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
+          sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=15.0/' telegram_sources.py
 
       - name: 🚀 Telegram 5 dakikalık otomatik tarama döngüsü
         timeout-minutes: 340
@@ -83,10 +86,10 @@ jobs:
             echo "=== OTOMATİK TELEGRAM TARAMA #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
             echo "============================================================"
 
+            sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=15.0/' telegram_fast_sources.py
+            sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=15.0/' telegram_sources.py
             timeout 120s python telegram_fast_sources.py || echo "Hızlı kaynak taraması hata verdi; sonraki aşamaya geçiliyor."
 
-            sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
-            sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_sources.py
             timeout 240s python telegram_sources.py || echo "Detaylı Telegram taraması hata verdi; sonraki tur devam edecek."
 
             timeout 120s python telegram_image_ocr_v2.py || echo "OCR bu turda hata verdi; sonraki tur devam edecek."
