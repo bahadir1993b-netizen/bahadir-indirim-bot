@@ -23,3 +23,15 @@ services:
       TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-180}
     command: >-
       sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
+
+  health:
+    build: .
+    container_name: bahadir-health
+    restart: unless-stopped
+    environment:
+      HEALTH_PORT: 8787
+    volumes:
+      - ./data:/app/data:ro
+    ports:
+      - "8787:8787"
+    command: python health_server.py
