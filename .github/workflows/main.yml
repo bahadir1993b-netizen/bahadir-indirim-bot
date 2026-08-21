@@ -79,6 +79,7 @@ jobs:
             cycle=$((cycle + 1))
             cycle_start=$SECONDS
             echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+            python apply_scanner_runtime_patch.py
             timeout 180s python marketplace_scanner.py || echo "Marketplace taraması bu turda hata verdi; sonraki tur devam edecek."
             remaining=$((end - SECONDS))
             if [ "$remaining" -le 0 ]; then break; fi
