@@ -3,30 +3,28 @@ from urllib.parse import urlparse,parse_qs,unquote
 from playwright.sync_api import sync_playwright
 import run_serper_v2 as v2
 
-# V3.3: aggressive link recovery without weakening price/reference safety.
-# docker-compose currently injects 60 resolve lookups; force a sane floor here so
-# large 170+ candidate runs do not stop resolving links halfway through the list.
-v2.MAX_RESOLVE=max(180,int(os.environ.get('MAX_RESOLVE_PER_RUN','180')))
-v2.MAX_MARKET=max(40,int(os.environ.get('MAX_MARKET_REF_PER_RUN','40')))
-v2.MAX_RENDER=max(20,int(os.environ.get('MAX_RENDER_CHECKS','20')))
-v2.NEG_CACHE=min(180,int(os.environ.get('NEGATIVE_CACHE_SECONDS','180')))
-OFFER_LOOKUPS=max(80,int(os.environ.get('MAX_OFFER_LINK_LOOKUPS','80')))
+# V3.4: finish link recovery, validate many more references, keep strict price-link safety.
+v2.MAX_RESOLVE=max(240,int(os.environ.get('MAX_RESOLVE_PER_RUN','240')))
+v2.MAX_MARKET=max(120,int(os.environ.get('MAX_MARKET_REF_PER_RUN','120')))
+v2.MAX_RENDER=max(60,int(os.environ.get('MAX_RENDER_CHECKS','60')))
+v2.NEG_CACHE=min(120,int(os.environ.get('NEGATIVE_CACHE_SECONDS','120')))
+OFFER_LOOKUPS=max(120,int(os.environ.get('MAX_OFFER_LINK_LOOKUPS','120')))
 _offer_lookups=0
 
-# Fresh cache namespace: old negative link results must not poison V3.3.
-def ckey_v33(site,title):
+# Fresh cache namespace so V3.3 negative resolutions do not suppress improved attempts.
+def ckey_v34(site,title):
     norm=re.sub(r'\s+',' ',(title or '').lower()).strip()
-    return hashlib.sha1(f'v33|{site}|{norm}'.encode()).hexdigest()
-v2.ckey=ckey_v33
+    return hashlib.sha1(f'v34|{site}|{norm}'.encode()).hexdigest()
+v2.ckey=ckey_v34
 
 _base_inspect=v2.inspect_page
-def inspect_page_v33(url,expected=None):
+def inspect_page_v34(url,expected=None):
     out=_base_inspect(url,expected)
     if out.get('available') is None and out.get('ok'):
         if out.get('live') or (out.get('title') or '').strip() or out.get('image'):
             out['available']=True;out['availability_evidence']='soft-product-page'
     return out
-v2.inspect_page=inspect_page_v33
+v2.inspect_page=inspect_page_v34
 
 def compact_title(title):
     t=re.sub(r'\([^)]{20,}\)',' ',title or '')
@@ -38,7 +36,6 @@ def _price_close(a,b,tol=.04):
     return bool(a and b and abs(float(a)-float(b))/max(float(a),float(b),1)<=tol)
 
 def _unwrap(link):
-    """Recover merchant URL from Google redirect/tracking links when present."""
     if not link:return ''
     try:
         p=urlparse(link)
@@ -54,10 +51,9 @@ def _candidate_score(title,result_title,link):
     aa=v2.toks(title);bb=v2.toks((result_title or '')+' '+urlparse(link).path.replace('-',' '))
     if not aa:return 0
     overlap=len(aa&bb)/max(1,len(aa))
-    # Model/number tokens are especially useful for tablets, watches, TVs, etc.
     nums=set(re.findall(r'\b[a-z]*\d+[a-z0-9-]*\b',(title or '').lower()))
     rnums=set(re.findall(r'\b[a-z]*\d+[a-z0-9-]*\b',((result_title or '')+' '+link).lower()))
-    bonus=.18 if nums and nums&rnums else 0
+    bonus=.20 if nums and nums&rnums else 0
     return overlap+bonus
 
 def _shopping_exact_offer(it,site,title):
@@ -67,8 +63,6 @@ def _shopping_exact_offer(it,site,title):
     _offer_lookups+=1
     try:
         best=None;best_score=0
-        # One exact-title shopping call usually returns the direct merchant URL and
-        # is more useful than several organic searches.
         for r in v2.shopping(compact_title(title)):
             rp=v2.pprice(r.get('price'));link=_unwrap(r.get('link') or '');rt=r.get('title') or ''
             if not _price_close(rp,listed,.05):continue
@@ -81,7 +75,7 @@ def _shopping_exact_offer(it,site,title):
     except Exception as e:print(f'Fiyat-link arama hatası: {type(e).__name__}')
     return None
 
-def resolve_v33(it,site):
+def resolve_v34(it,site):
     raw=_unwrap(it.get('link') or '');title=re.sub(r'\s+',' ',it.get('title') or '').strip()
     if v2.valid(raw,site):v2.cset(site,title,raw);return raw
     cached,known=v2.cget(site,title)
@@ -93,8 +87,6 @@ def resolve_v33(it,site):
     short=compact_title(title)
     toks=list(v2.toks(title))
     model=' '.join(sorted(toks,key=lambda x:(not any(c.isdigit() for c in x),-len(x)))[:10])
-    # Spend at most two organic searches per candidate. V3.2 could spend four,
-    # exhausting the 60-query budget on the first part of the candidate list.
     queries=[
         f'site:{v2.SITE_DOMAIN[site]} "{short[:145]}"',
         f'site:{v2.SITE_DOMAIN[site]} {model or " ".join(short.split()[:8])}',
@@ -111,7 +103,7 @@ def resolve_v33(it,site):
     if best:
         v2.cset(site,title,best);print(f'Direkt ürün linki doğrulandı: {site} | skor={best_score:.2f} | {best[:140]}');return best
     v2.cset(site,title,None);return None
-v2.resolve=resolve_v33
+v2.resolve=resolve_v34
 
 def _body_prices(body,current):
     vals=[]
@@ -122,7 +114,7 @@ def _body_prices(body,current):
             if x and current*.55<=x<=current*1.65:vals.append(x)
     return vals
 
-def render_verify_v33(link,current,title):
+def render_verify_v34(link,current,title):
     if v2.COUNTERS['render']>=v2.MAX_RENDER:return True,None,''
     v2.COUNTERS['render']+=1
     try:
@@ -158,8 +150,8 @@ def render_verify_v33(link,current,title):
             b.close();return True,rv,ttl
     except Exception as e:
         print(f'RENDER HATA (stok engeli uygulanmadı): {type(e).__name__} | {title[:60]}');return True,None,''
-v2.render_verify=render_verify_v33
+v2.render_verify=render_verify_v34
 
 if __name__=='__main__':
-    print(f'=== Serper V3.3 aktif | link çözüm={v2.MAX_RESOLVE} | fiyat-link bütünlüğü + esnek stok ===')
+    print(f'=== Serper V3.4 aktif | link çözüm={v2.MAX_RESOLVE} | piyasa kontrol={v2.MAX_MARKET} | fiyat-link bütünlüğü + esnek stok ===')
     v2.main()
