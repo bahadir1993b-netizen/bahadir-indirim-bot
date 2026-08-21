@@ -125,10 +125,23 @@ def verify(page,site,url,fallback_title,expected_current,candidate_previous):
     except Exception as e:print('VERIFY HATA',site,url,e);return None
 
 def send(site,url,title,current,previous,discount,image):
-    rows=sb('GET','products',params={'select':'*','product_url':f'eq.{url}','limit':'1'}); row=rows[0] if rows else None; last=row.get('last_posted_at') if isinstance(row,dict) else None
-    if last:
+    # URL bazlı cooldown
+    rows=sb('GET','products',params={'select':'*','product_url':f'eq.{url}','limit':'10'})
+    now_dt=datetime.now(timezone.utc)
+    for row in rows or []:
+        last=row.get('last_posted_at') if isinstance(row,dict) else None
+        if last:
+            try:
+                if now_dt-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):
+                    print(f'MÜKERRER ENGELLENDİ | URL | {site} | {url}'); return False
+            except:pass
+    # URL varyasyonu olsa bile aynı ürün + aynı fiyatı kısa sürede tekrar gönderme.
+    title_rows=sb('GET','products',params={'select':'product_url,last_posted_at,current_price','site':f'eq.{site}','product_name':f'eq.{title}','limit':'20'})
+    for row in title_rows or []:
         try:
-            if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):return False
+            last=row.get('last_posted_at'); old_price=float(row.get('current_price')) if row.get('current_price') is not None else None
+            if last and old_price is not None and abs(old_price-current)<0.01 and now_dt-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):
+                print(f'MÜKERRER ENGELLENDİ | ÜRÜN+FİYAT | {site} | {title[:100]} | {current:.2f}'); return False
         except:pass
     fmt=lambda x:f'{x:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.')
     text=f'⭐️ BOTUN BULDUĞU FIRSAT\n\n🔥 %{discount:.0f} İNDİRİM\n\n🛍️ {title}\n💰 {fmt(current)}\n🏷️ Önceki: {fmt(previous)}\n\n👇 Fırsata git'
@@ -139,8 +152,8 @@ def send(site,url,title,current,previous,discount,image):
             r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',json={'chat_id':CHAT,'photo':image,'caption':text,'reply_markup':keyboard},timeout=10); sent=r.ok
         if not sent:requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHAT,'text':text,'disable_web_page_preview':False,'reply_markup':keyboard},timeout=10).raise_for_status()
     except Exception as e:print('GÖNDERME HATASI',site,url,e);return False
-    now=datetime.now(timezone.utc).isoformat()
-    if row and row.get('id'):sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':now,'current_price':current,'previous_price':previous,'updated_at':now})
+    now=now_dt.isoformat()
+    if rows and rows[0].get('id'):sb('PATCH',f'products?id=eq.{rows[0]["id"]}',json={'last_posted_at':now,'current_price':current,'previous_price':previous,'updated_at':now})
     else:sb('POST','products',json={'product_name':title,'current_price':current,'previous_price':previous,'product_url':url,'site':site,'updated_at':now,'last_posted_at':now})
     print(f'⭐️ BAĞIMSIZ FIRSAT | {site} | %{discount:.1f} | {current:.2f} TL | {title[:90]}');return True
 
