@@ -1,6 +1,6 @@
 import os,re,requests,hashlib
 from datetime import datetime, timezone
-from urllib.parse import urlparse, urlunparse, urlencode, quote
+from urllib.parse import urlparse, urlunparse, urlencode
 import bot
 
 if bot.SUPABASE_URL.endswith('/rest/v1'):
@@ -15,6 +15,9 @@ TARGETS={
     'trendyol.com':'Trendyol','www.trendyol.com':'Trendyol',
 }
 SITE_DOMAIN={'Amazon':'amazon.com.tr','Hepsiburada':'hepsiburada.com','Trendyol':'trendyol.com'}
+MAX_RESOLVE_PER_RUN=24
+_resolve_count=0
+
 
 def parse_price(v):
     if not v:return None
@@ -29,9 +32,11 @@ def parse_price(v):
         x=float(s);return x if 1<x<10000000 else None
     except:return None
 
+
 def canonical_for_db(link):
     p=urlparse(link)
     return urlunparse(('https',p.netloc.lower(),p.path.rstrip('/'),'','',''))
+
 
 def clean_link(link,site):
     if not link:return ''
@@ -39,11 +44,35 @@ def clean_link(link,site):
     if site=='Amazon' and AMAZON_TAG:query=[('tag',AMAZON_TAG)]
     return urlunparse(('https',host,p.path.rstrip('/'),'','','')) + (('?'+urlencode(query)) if query else '')
 
-def is_direct_target(link,site):
+
+def valid_product_url(link,site):
     try:
-        host=urlparse(link).netloc.lower()
-        return TARGETS.get(host)==site
-    except:return False
+        p=urlparse(link);host=p.netloc.lower();path=p.path.rstrip('/')
+        if TARGETS.get(host)!=site:return False
+        low=path.lower()
+        if not path or low.endswith('/yorumlari') or '/kategori/' in low:return False
+        if site=='Amazon':
+            return bool(re.search(r'/(?:dp|gp/product|gp/aw/d)/[A-Z0-9]{8,}(?:/|$)',path,re.I))
+        if site=='Trendyol':
+            return bool(re.search(r'-p-\d+(?:/|$)',path,re.I))
+        if site=='Hepsiburada':
+            return bool(re.search(r'-(?:pm-)?[A-Z0-9]{8,}(?:/|$)',path,re.I)) and not re.search(r'-c-\d+(?:/|$)',path,re.I)
+    except Exception:
+        return False
+
+
+def meaningful_tokens(text):
+    stop={'ve','ile','icin','için','bir','yeni','set','siyah','beyaz','urun','ürün','model','adet','the'}
+    return {x for x in re.findall(r'[a-z0-9]+', (text or '').lower()) if len(x)>=4 and x not in stop}
+
+
+def result_matches_title(item_title,result_title,link):
+    a=meaningful_tokens(item_title);b=meaningful_tokens((result_title or '')+' '+urlparse(link).path.replace('-',' '))
+    if not a:return False
+    common=a & b
+    # Marka/model gibi en az iki anlamlı ortak token; çok kısa başlıklarda bir güçlü token yeterli.
+    return len(common)>=2 or (len(a)<=2 and len(common)>=1)
+
 
 def serper_shopping(query):
     r=requests.post('https://google.serper.dev/shopping',headers={'X-API-KEY':SERPER_API_KEY,'Content-Type':'application/json'},json={'q':query,'gl':'tr','hl':'tr','location':'Turkey','num':100},timeout=20)
@@ -52,11 +81,17 @@ def serper_shopping(query):
         print(r.text[:300]);return []
     return r.json().get('shopping') or []
 
+
 def serper_search(query):
+    global _resolve_count
+    if _resolve_count>=MAX_RESOLVE_PER_RUN:
+        return []
+    _resolve_count+=1
     r=requests.post('https://google.serper.dev/search',headers={'X-API-KEY':SERPER_API_KEY,'Content-Type':'application/json'},json={'q':query,'gl':'tr','hl':'tr','location':'Turkey','num':10},timeout=20)
-    print(f'Serper link çözüm [{query[:65]}] HTTP: {r.status_code}')
+    print(f'Serper link çözüm #{_resolve_count} [{query[:65]}] HTTP: {r.status_code}')
     if not r.ok:return []
     return r.json().get('organic') or []
+
 
 def site_from_item(item):
     link=item.get('link') or '';host=urlparse(link).netloc.lower()
@@ -67,31 +102,34 @@ def site_from_item(item):
     if 'trendyol' in source:return 'Trendyol'
     return None
 
+
 def resolve_direct_link(item,site):
     raw=item.get('link') or ''
-    if is_direct_target(raw,site):return raw
     title=re.sub(r'\s+',' ',item.get('title') or '').strip()
-    domain=SITE_DOMAIN[site]
+    if valid_product_url(raw,site):return raw
     if not title:return None
-    # Google Shopping bazen https://www.google.com/search döndürüyor. Exact ürün başlığıyla mağaza domaininde organik sonuç ara.
-    queries=[f'site:{domain} "{title[:140]}"', f'site:{domain} {title[:100]}']
-    for q in queries:
-        for result in serper_search(q):
-            link=result.get('link') or ''
-            if is_direct_target(link,site):
-                print(f'Direkt link çözüldü: {site} | {link[:150]}')
-                return link
-    print(f'Direkt ürün linki bulunamadı; ürün atlandı: {site} | {title[:90]}')
+    if _resolve_count>=MAX_RESOLVE_PER_RUN:
+        print(f'Link çözüm limiti doldu; ürün sonraki tura bırakıldı: {site} | {title[:75]}')
+        return None
+    domain=SITE_DOMAIN[site]
+    q=f'site:{domain} "{title[:140]}"'
+    for result in serper_search(q):
+        link=result.get('link') or ''
+        if valid_product_url(link,site) and result_matches_title(title,result.get('title') or '',link):
+            print(f'Direkt ürün linki doğrulandı: {site} | {link[:150]}')
+            return link
+    print(f'Güvenilir direkt ürün linki bulunamadı; atlandı: {site} | {title[:90]}')
     return None
 
+
 def product_identity(item,site,direct_link):
-    # Gerçek mağaza URL'si varsa kimlik odur. Böylece farklı ürünler google.com/search altında birleşmez.
     if direct_link:return canonical_for_db(direct_link)
     pid=str(item.get('productId') or '').strip()
     if pid:return f'https://serper.local/{site.lower()}/{pid}'
     title=re.sub(r'\s+',' ',item.get('title') or '').strip().lower()
     h=hashlib.sha1(f'{site}|{title}'.encode('utf-8')).hexdigest()
     return f'https://serper.local/{site.lower()}/{h}'
+
 
 def process_item(item):
     site=site_from_item(item)
@@ -137,6 +175,7 @@ def process_item(item):
     except Exception as e:
         print(f'İşlem hata: {type(e).__name__}: {e}');return False
 
+
 def main():
     print('=== Serper alışveriş botu başladı ===')
     seen=set();matched=0;sent=0
@@ -149,6 +188,6 @@ def main():
             if not site or key in seen:continue
             seen.add(key);matched+=1
             if process_item(item):sent+=1
-    print(f'=== Bitti. Hedef ürün: {matched} | Gönderilen: {sent} ===')
+    print(f'=== Bitti. Hedef ürün: {matched} | link çözüm sorgusu: {_resolve_count} | Gönderilen: {sent} ===')
 
 if __name__=='__main__':main()
