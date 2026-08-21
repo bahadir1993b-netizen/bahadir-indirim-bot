@@ -7,19 +7,16 @@ services:
       - .env
     environment:
       SCAN_INTERVAL: ${SCAN_INTERVAL:-1800}
-      DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-100}
-      DIRECT_HISTORY_DAYS: ${DIRECT_HISTORY_DAYS:-365}
-      DIRECT_HISTORY_WRITE_HOURS: ${DIRECT_HISTORY_WRITE_HOURS:-6}
-      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-20}
+      DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-120}
+      DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-24}
       DIRECT_FRESH_SOURCE_HOURS: ${DIRECT_FRESH_SOURCE_HOURS:-4}
-      DIRECT_COOLDOWN_HOURS: ${DIRECT_COOLDOWN_HOURS:-12}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_direct_reported.py; code=$$?; echo "API-siz fiyat takip turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
+      sh -c 'while true; do python run_direct_reported.py; code=$$?; echo "API-siz V4 fiyat takip turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
 
   telegram-bot:
     build: .
@@ -46,15 +43,61 @@ services:
       - .env
     environment:
       LOCAL_PRICE_DB: /app/data/price_memory.db
-      HARVEST_INTERVAL: ${HARVEST_INTERVAL:-21600}
-      HARVEST_PAGES_PER_RUN: ${HARVEST_PAGES_PER_RUN:-8}
-      HARVEST_MAX_BLOCKS: ${HARVEST_MAX_BLOCKS:-400}
+      HARVEST_INTERVAL: ${HARVEST_INTERVAL:-1800}
+      HARVEST_PAGES_PER_RUN: ${HARVEST_PAGES_PER_RUN:-16}
+      HARVEST_MAX_BLOCKS: ${HARVEST_MAX_BLOCKS:-900}
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_history_harvester.py; code=$$?; echo "Geçmiş fiyat hasadı bitti (kod=$$code). ${HARVEST_INTERVAL:-21600} sn sonra tekrar."; sleep ${HARVEST_INTERVAL:-21600}; done'
+      sh -c 'while true; do python run_history_harvester.py; code=$$?; echo "Telegram geçmiş hasadı bitti (kod=$$code). ${HARVEST_INTERVAL:-1800} sn sonra tekrar."; sleep ${HARVEST_INTERVAL:-1800}; done'
+
+  onual-harvester:
+    build: .
+    container_name: bahadir-onual-harvester
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+      ONUAL_INTERVAL: ${ONUAL_INTERVAL:-1800}
+      ONUAL_PAGES_PER_RUN: ${ONUAL_PAGES_PER_RUN:-30}
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_onual_harvester.py; code=$$?; echo "OnuAl arşiv hasadı bitti (kod=$$code). ${ONUAL_INTERVAL:-1800} sn sonra tekrar."; sleep ${ONUAL_INTERVAL:-1800}; done'
+
+  akakce-enricher:
+    build: .
+    container_name: bahadir-akakce-enricher
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+      AKAKCE_INTERVAL: ${AKAKCE_INTERVAL:-7200}
+      AKAKCE_LIMIT: ${AKAKCE_LIMIT:-40}
+      AKAKCE_SLEEP: ${AKAKCE_SLEEP:-0.7}
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_akakce_enricher.py; code=$$?; echo "Akakçe zenginleştirme bitti (kod=$$code). ${AKAKCE_INTERVAL:-7200} sn sonra tekrar."; sleep ${AKAKCE_INTERVAL:-7200}; done'
+
+  serper-seed:
+    build: .
+    container_name: bahadir-serper-seed
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+      SERPER_SEED_INTERVAL: ${SERPER_SEED_INTERVAL:-21600}
+      SERPER_SEED_QUERIES: ${SERPER_SEED_QUERIES:-12}
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_serper_seed.py; code=$$?; echo "Serper seed turu bitti (kod=$$code). ${SERPER_SEED_INTERVAL:-21600} sn sonra tekrar."; sleep ${SERPER_SEED_INTERVAL:-21600}; done'
 
   health:
     build: .
