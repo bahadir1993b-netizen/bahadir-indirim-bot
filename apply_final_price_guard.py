@@ -13,12 +13,13 @@ def _bahadir_authoritative_live_price(site,url,page):
         'Amazon':[
             '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
             '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
-            '#corePrice_desktop .a-price .a-offscreen',
-            '#priceblock_dealprice', '#priceblock_ourprice', '#price_inside_buybox'
+            '#corePrice_desktop .a-price .a-offscreen'
         ],
         'Hepsiburada':['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]'],
         'Trendyol':['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]']
     }
+    # Amazon'daki eski/gizli #priceblock_* alanlarını bilerek kullanmıyoruz.
+    # Bu alanlar bazı ürünlerde artık geçerli olmayan 90 TL gibi değerler taşıyabiliyor.
     for sel in selectors.get(site,[]):
         for el in soup.select(sel):
             raw=el.get('content') or el.get('value') or el.get_text(' ',strip=True)
@@ -75,6 +76,6 @@ verify=_bahadir_final_verify
     s=s.replace(marker,guard+marker,1)
     P.write_text(s,encoding='utf-8')
     compile(s,str(P),'exec')
-    print('FINAL PRICE GUARD OK')
+    print('FINAL PRICE GUARD OK | stale Amazon priceblock fallback removed')
 else:
     print('FINAL PRICE GUARD zaten uygulanmış')
