@@ -81,13 +81,12 @@ jobs:
             cycle_start=$SECONDS
             echo "=== Marketplace tarama #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
-            # Hepsiburada + Trendyol tek başına bu motorda çalışır.
-            # İlk gözlemde arama kartındaki eski fiyat kesinlikle referans alınmaz.
+            # Hepsiburada + Trendyol: daha geniş arama, gerçek eski fiyat ve canlı fiyat doğrulaması.
+            python apply_nonamazon_quality_patch.py
             python apply_historical_reference_guard.py
-            timeout 180s python marketplace_nonamazon_scanner.py || echo "Hepsiburada/Trendyol taraması bu turda hata verdi; Amazon taramasına geçiliyor."
+            timeout 240s python marketplace_nonamazon_scanner.py || echo "Hepsiburada/Trendyol taraması bu turda hata verdi; Amazon taramasına geçiliyor."
 
-            # Amazon motorunu mevcut haliyle koruyoruz. HB/Trendyol burada
-            # çalıştırılmadığı için aynı ürün iki farklı motor tarafından gönderilemez.
+            # Amazon motoru: yalnız Amazon çalışır; canlı ödeme fiyatı son kapıdır.
             python apply_amazon_only_marketplace_runtime.py
             sed -i 's/MIN_DISCOUNT = 10.0/MIN_DISCOUNT = 15.0/' marketplace_scanner.py
             python apply_scanner_runtime_patch.py
