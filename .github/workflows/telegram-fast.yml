@@ -30,8 +30,6 @@ jobs:
       - name: Gereksinimleri kur
         run: pip install -r requirements.txt
 
-      # Her 5 dakikalık turun İLK İŞİ: Telegram kaynaklarını hızlıca kontrol et.
-      # Chromium/OCR kurulumu fırsatların önüne geçmez.
       - name: ⚡ İlk Telegram kaynak taraması
         timeout-minutes: 3
         env:
@@ -41,10 +39,10 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
           set -u
-          echo "=== ÖNCELİK: Telegram kaynakları ==="
+          sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_fast_sources.py
+          echo "=== ÖNCELİK: Telegram kaynakları | minimum indirim %10 ==="
           timeout 120s python telegram_fast_sources.py || echo "İlk hızlı Telegram taraması hata verdi; devam ediliyor."
 
-      # Ağır araçlar sadece bir kez kurulur.
       - name: Chromium kur
         run: python -m playwright install --with-deps chromium
 
@@ -60,8 +58,9 @@ jobs:
       - name: Telegram canlı fiyat fallback düzeltmesi
         run: python apply_telegram_safety_patch.py
 
-      # Runner yaklaşık 5 saat 45 dakika boyunca canlı kalır.
-      # Böylece yeni kaynak mesajları 5 dakika içinde yakalanır.
+      - name: Telegram kaynak indirim eşiğini %10 yap
+        run: sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_sources.py
+
       - name: 🚀 Telegram 5 dakikalık otomatik tarama döngüsü
         timeout-minutes: 340
         env:
@@ -71,7 +70,6 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ozelfirsat09-21
         run: |
           set -u
-          # 5 saat 35 dakika; job timeout'una güvenli pay bırakır.
           end=$((SECONDS + 20100))
           cycle=0
           while [ "$SECONDS" -lt "$end" ]; do
@@ -82,14 +80,12 @@ jobs:
             echo "=== OTOMATİK TELEGRAM TARAMA #$cycle | $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
             echo "============================================================"
 
-            # 1) Önce kaynak kanallar: hızlı ve düşük maliyetli tarama.
             timeout 120s python telegram_fast_sources.py || echo "Hızlı kaynak taraması hata verdi; sonraki aşamaya geçiliyor."
 
-            # 2) Detaylı Telegram taraması.
             sed -i 's/^MAX_AGE=.*/MAX_AGE=45/' telegram_sources.py
+            sed -i 's/^MIN_DISCOUNT=6.0/MIN_DISCOUNT=10.0/' telegram_sources.py
             timeout 240s python telegram_sources.py || echo "Detaylı Telegram taraması hata verdi; sonraki tur devam edecek."
 
-            # 3) Görsel/OCR kupon taraması.
             timeout 120s python telegram_image_ocr_v2.py || echo "OCR bu turda hata verdi; sonraki tur devam edecek."
 
             remaining=$((end - SECONDS))
