@@ -48,17 +48,12 @@ new = '''    try:
         disc = None
 '''
 
-if old not in s:
-    raise SystemExit('Telegram canlı fiyat kontrol bloğu bulunamadı; güvenli patch uygulanmadı')
-s = s.replace(old, new, 1)
+if old in s:
+    s = s.replace(old, new, 1)
+else:
+    print('Canlı fiyat bloğu zaten patchlenmiş; atlandı.')
 
-# Aynı ürün farklı kaynaklardan veya farklı kısaltılmış linklerden geldiğinde
-# URL birebir aynı olmasa bile yakın fiyat + güçlü başlık benzerliği ile tekrar paylaşma.
-dedupe = '''
-
-# Kaynaklar aynı ürünü farklı fiyat yuvarlaması/linkiyle gönderebilir.
-# Son 12 saatte aynı mağaza + çok benzer ürün başlığı + %1'den küçük fiyat farkı
-# varsa ikinci paylaşımı engelle.
+# Aynı mağaza + çok benzer ürün + %1'den küçük fiyat farkı ile 12 saatlik tekrar engeli.
 if 'def _bahadir_duplicate_recent' not in s:
     marker = "def send(s,u,t,c,p,source,post_id,signal,coupon=None):"
     helper = '''def _bahadir_norm_title(text):
@@ -88,12 +83,83 @@ def _bahadir_duplicate_recent(site_name, title, current):
     return False
 
 '''
-    s = s.replace(marker, helper + marker, 1)
-    needle = "    row=save(s,u,title,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None"
-    replacement = "    if _bahadir_duplicate_recent(s,title,c): remember(key); return False\n" + needle
-    if needle not in s:
-        raise SystemExit('Telegram send kayıt satırı bulunamadı; tekrar koruması uygulanmadı')
-    s = s.replace(needle, replacement, 1)
+    if marker in s:
+        s = s.replace(marker, helper + marker, 1)
+        needle = "    row=save(s,u,title,c,p); last=row.get('last_posted_at') if isinstance(row,dict) else None"
+        replacement = "    if _bahadir_duplicate_recent(s,title,c): remember(key); return False\n" + needle
+        if needle in s:
+            s = s.replace(needle, replacement, 1)
+        else:
+            print('send kayıt satırı bulunamadı; tekrar koruması atlandı.')
+    else:
+        print('send marker bulunamadı; tekrar koruması atlandı.')
+
+# Telegram kaynak mesajındaki fotoğrafı, mevcut send() fonksiyonunun sendMessage çağrısını
+# sendPhoto'ya dönüştürerek taşır. Böylece mevcut fiyat/filtre mantığı bozulmaz.
+if 'def _bahadir_photo_process' not in s:
+    photo_patch = r'''
+
+_BAHADIR_SOURCE_IMAGE = None
+_BAHADIR_ORIGINAL_SEND = send
+_BAHADIR_ORIGINAL_PROCESS = process
+
+def _bahadir_extract_source_image(block):
+    wrap = block.select_one('.tgme_widget_message_photo_wrap')
+    if wrap:
+        st = wrap.get('style','')
+        m = re.search(r"url\(['\"]?([^'\")]+)", st)
+        if m: return clean(m.group(1))
+    img = block.select_one('.tgme_widget_message_photo img, .tgme_widget_message_photo_wrap img')
+    if img:
+        return clean(img.get('src') or img.get('data-src') or '')
+    return None
+
+def send(s,u,t,c,p,source,post_id,signal,coupon=None):
+    image_url = _BAHADIR_SOURCE_IMAGE
+    if not image_url:
+        return _BAHADIR_ORIGINAL_SEND(s,u,t,c,p,source,post_id,signal,coupon)
+    original_post = requests.post
+    def post_intercept(url, **kwargs):
+        if '/sendMessage' not in url:
+            return original_post(url, **kwargs)
+        try:
+            payload = kwargs.get('json') or {}
+            text = payload.get('text','')
+            markup = payload.get('reply_markup')
+            ir = requests.get(image_url, headers=HEAD, timeout=10)
+            if not ir.ok or len(ir.content) < 1000:
+                print(f'GÖRSEL ALINAMADI | {source}:{post_id} | HTTP={ir.status_code}')
+                return original_post(url, **kwargs)
+            import json
+            return original_post('https://api.telegram.org/bot'+TOKEN+'/sendPhoto',
+                data={'chat_id':CHAT,'caption':text[:1024],
+                      'reply_markup':json.dumps(markup,ensure_ascii=False) if markup else None},
+                files={'photo':('source.jpg',ir.content,'image/jpeg')}, timeout=20)
+        except Exception as e:
+            print(f'GÖRSEL TAŞIMA HATA | {source}:{post_id} | {type(e).__name__}: {e}')
+            return original_post(url, **kwargs)
+    requests.post = post_intercept
+    try:
+        return _BAHADIR_ORIGINAL_SEND(s,u,t,c,p,source,post_id,signal,coupon)
+    finally:
+        requests.post = original_post
+
+def process(source,b,page):
+    global _BAHADIR_SOURCE_IMAGE
+    _BAHADIR_SOURCE_IMAGE = _bahadir_extract_source_image(b)
+    try:
+        return _BAHADIR_ORIGINAL_PROCESS(source,b,page)
+    finally:
+        _BAHADIR_SOURCE_IMAGE = None
+
+'''
+    main_marker = "if __name__ == '__main__':"
+    if main_marker in s:
+        s = s.replace(main_marker, photo_patch + main_marker, 1)
+    else:
+        s += photo_patch
 
 P.write_text(s, encoding='utf-8')
-print('Telegram safety patch uygulandı: canlı fiyat fallback + aynı üründe 12 saat tekrar koruması.')
+print('Telegram safety patch uygulandı: canlı fiyat fallback + ürün tekrar koruması + kaynak fotoğraf taşıma.')
+'''
+
