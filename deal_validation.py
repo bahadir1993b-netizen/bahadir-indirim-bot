@@ -99,17 +99,29 @@ def inspect_page(url,expected=None):
     except Exception:return out
 
 def choose_reference(current,history=None,source=None,page=None,market_median=None,market_floor=None):
-    """Conservative reference: prefer typical prices and cap any local/list-price claims by market median."""
+    """Conservative reference.
+
+    A current-market median is useful for sanity checking, but it is not proof of a
+    historical/previous price. A discount reference must come from the product's own
+    history, a credible source old/list price, or the live product page. Market data
+    may only corroborate/cap that local reference.
+    """
     history=[float(x) for x in (history or []) if x and current*1.03<float(x)<=current*1.8]
     hist=float(statistics.median(history)) if history else None
     local=[x for x in (hist,source,page) if x and current*1.03<x<=current*1.8]
     local_ref=float(statistics.median(local)) if local else None
+
+    # If the same product is already materially cheaper elsewhere, this is not a deal.
     if market_floor and current>market_floor*1.05:return None,'market-blocked'
-    if market_median and market_median>current*1.03:
-        ref=min(local_ref,market_median) if local_ref else market_median
-        return ref,'market+history' if local_ref else 'market'
+
     if local_ref:
-        # Without market validation, do not trust spectacular list-price claims.
+        # Market median can only cap/corroborate a real historical/list-price signal.
+        if market_median and market_median>current*1.03:
+            ref=min(local_ref,market_median)
+            return ref,'market+history'
+        # Without external market corroboration, reject spectacular references.
         if local_ref>current*1.45:return None,'unverified-high-reference'
         return local_ref,'history/page'
-    return None,'no-reference'
+
+    # Never manufacture an "old price" from today's cross-store median alone.
+    return None,'no-historical-reference'
