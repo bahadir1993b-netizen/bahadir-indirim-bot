@@ -24,12 +24,13 @@ def money(s):
 
 def sb(method,path,**kw):
  h={'apikey':KEY,'Authorization':f'Bearer {KEY}','Content-Type':'application/json','Accept':'application/json'}
+ if method=='POST':h['Prefer']='return=representation'
  r=requests.request(method,f'{SB}/rest/v1/{path}',headers=h,timeout=10,**kw);r.raise_for_status();return r.json() if r.text else []
 
 def normalize(site,url):
  p=urlparse(url);return p._replace(query='',fragment='').geturl().rstrip('/')
 
-def already_posted(site,u):
+def recent(site,u):
  try:
   rows=sb('GET','products',params={'select':'last_posted_at','site':f'eq.{site}','product_url':f'eq.{u}','limit':'1'})
   if rows and rows[0].get('last_posted_at'):
@@ -45,18 +46,34 @@ def extract(page,site,query):
   u=x.get('href') or '';card=x.get('card') or '';title=x.get('text') or ''
   if not pat.search(urlparse(u).path):continue
   u=normalize(site,u)
-  if u in seen or already_posted(site,u):continue
+  if u in seen or recent(site,u):continue
   seen.add(u);vals=[money(m.group()) for m in MONEY.finditer(card)];vals=[v for v in vals if v]
   if len(vals)<2:continue
-  current=min(vals);previous=max(vals)
-  if previous<=current or previous/current>4:continue
-  d=(previous-current)/previous*100
-  if d<MIN_DISCOUNT:continue
-  title=' '.join((title or card).split())[:220];out.append((u,title,current,previous))
+  current=min(vals);display_old=max(vals)
+  if display_old<=current or display_old/current>4:continue
+  title=' '.join((title or card).split())[:220]
+  # Arama kartındaki eski fiyat SADECE adaydır; indirim hesabında kullanılmaz.
+  out.append((u,title,current))
   if len(out)>=5:break
  print(f'NON-AMAZON ARAMA | {site} | {query} | aday={len(out)}');return out
 
-def verify(page,site,u,expected,previous):
+def history(site,u,current):
+ try:
+  rows=sb('GET','price_history',params={'select':'price,recorded_at','product_url':f'eq.{u}','site':f'eq.{site}','order':'recorded_at.desc','limit':'50'})
+  vals=[]
+  for r in rows:
+   try:
+    p=float(r.get('price')); dt=datetime.fromisoformat(r['recorded_at'].replace('Z','+00:00'))
+    if p>current and dt<=datetime.now(timezone.utc): vals.append(p)
+   except:pass
+  return min(vals) if vals else None
+ except Exception as e:print('NON-AMAZON HISTORY HATA',site,e);return None
+
+def record(site,u,current):
+ try:sb('POST','price_history',json={'price':current,'product_url':u,'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
+ except Exception as e:print('NON-AMAZON HISTORY KAYIT HATA',site,e)
+
+def verify(page,site,u,expected):
  try:
   page.goto(u,wait_until='domcontentloaded',timeout=8000);page.wait_for_timeout(500);soup=BeautifulSoup(page.content(),'html.parser');vals=[]
   for el in soup.select('meta[itemprop="price"],meta[property="product:price:amount"],[itemprop="price"],[data-price]'):
@@ -68,34 +85,50 @@ def verify(page,site,u,expected,previous):
     if v:vals.append(v)
   if not vals:return None
   current=min(vals,key=lambda v:abs(v-expected))
-  if abs(current-expected)/max(expected,1)>.05:print(f'NON-AMAZON FİYAT RED | {site} | arama={expected:.2f} | canlı={current:.2f}');return None
-  old=previous if previous>current else None
-  if not old or (old-current)/old*100<MIN_DISCOUNT:return None
-  te=soup.select_one('meta[property="og:title"]');ie=soup.select_one('meta[property="og:image"]')
-  title=te.get('content','').strip() if te else (soup.title.get_text(' ',strip=True) if soup.title else site)
-  return title[:220],current,old,(old-current)/old*100,ie.get('content') if ie else None
- except Exception as e:print(f'NON-AMAZON VERIFY HATA | {site} | {type(e).__name__}');return None
+  if abs(current-expected)/max(expected,1)>.05:
+   print(f'NON-AMAZON FİYAT RED | {site} | arama={expected:.2f} | canlı={current:.2f}');return None
+  old=history(site,u,current)
+  # İlk görülen ürünün karttaki eski fiyatını asla sahte "önceki" olarak kullanma.
+  if not old or old<=current:
+   record(site,u,current);print(f'NON-AMAZON İLK KAYIT | {site} | {current:.2f} TL | henüz geçmiş fiyat yok');return None
+  d=(old-current)/old*100;record(site,u,current)
+  if d<MIN_DISCOUNT:return None
+  te=soup.select_one('meta[property="og:title"]') or soup.select_one('meta[name="twitter:title"]');ie=soup.select_one('meta[property="og:image"]') or soup.select_one('meta[name="twitter:image"]')
+  title=(te.get('content','').strip() if te else (soup.title.get_text(' ',strip=True) if soup.title else site))[:220]
+  return title,current,old,d,ie.get('content') if ie else None
+ except Exception as e:print(f'NON-AMAZON VERIFY HATA | {site} | {type(e).__name__}: {e}');return None
+
+def save_post(site,u,title,current,old):
+ now=datetime.now(timezone.utc).isoformat()
+ rows=sb('GET','products',params={'select':'id','site':f'eq.{site}','product_url':f'eq.{u}','limit':'1'})
+ if rows and rows[0].get('id'):
+  sb('PATCH',f'products?id=eq.{rows[0]["id"]}',json={'product_name':title,'current_price':current,'previous_price':old,'updated_at':now,'last_posted_at':now})
+ else:sb('POST','products',json={'product_name':title,'current_price':current,'previous_price':old,'product_url':u,'site':site,'updated_at':now,'last_posted_at':now})
 
 def send(site,u,title,current,old,d,image):
+ if recent(site,u):print(f'NON-AMAZON MÜKERRER ENGELLENDİ | {site}');return False
  fmt=lambda x:f'{x:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.')
  text=f'⭐️ BOTUN BULDUĞU FIRSAT\n\n🔥 %{d:.0f} İNDİRİM\n\n🛍️ {title}\n💰 {fmt(current)}\n🏷️ Önceki: {fmt(old)}\n\n👇 Fırsata git';kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
  try:
+  sent=False
   if image:
    r=requests.get(image,headers=HEAD,timeout=8)
    if r.ok and len(r.content)>1000:
-    requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHAT,'caption':text[:1024],'reply_markup':json.dumps(kb,ensure_ascii=False)},files={'photo':('product.jpg',r.content,'image/jpeg')},timeout=15).raise_for_status();return True
-  requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHAT,'text':text,'disable_web_page_preview':False,'reply_markup':kb},timeout=10).raise_for_status();return True
+    requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHAT,'caption':text[:1024],'reply_markup':json.dumps(kb,ensure_ascii=False)},files={'photo':('product.jpg',r.content,'image/jpeg')},timeout=15).raise_for_status();sent=True
+  if not sent:requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHAT,'text':text,'disable_web_page_preview':False,'reply_markup':kb},timeout=10).raise_for_status()
+  save_post(site,u,title,current,old);return True
  except Exception as e:print(f'NON-AMAZON GÖNDERME HATA | {site} | {type(e).__name__}: {e}');return False
 
 def main():
- sent=0
+ sent=0;seen_urls=set()
  with sync_playwright() as pw:
   browser=pw.chromium.launch(headless=True);page=browser.new_page(user_agent=HEAD['User-Agent'],locale='tr-TR');detail=browser.new_page(user_agent=HEAD['User-Agent'],locale='tr-TR')
   for site in SITES:
    for q in QUERIES:
     try:
-     for u,title,current,old in extract(page,site,q):
-      v=verify(detail,site,u,current,old)
+     for u,title,current in extract(page,site,q):
+      if u in seen_urls:continue
+      seen_urls.add(u);v=verify(detail,site,u,current)
       if v:
        t,c,p,d,img=v
        if send(site,u,t,c,p,d,img):sent+=1;print(f'⭐️ NON-AMAZON FIRSAT | {site} | %{d:.1f} | {c:.2f} TL | {t[:80]}')
