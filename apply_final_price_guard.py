@@ -9,17 +9,24 @@ if 'def _bahadir_final_verify' not in s:
 
 def _bahadir_authoritative_live_price(site,url,page):
     soup=BeautifulSoup(page.content(),'html.parser')
-    selectors={
-        'Amazon':[
+    if site=='Amazon':
+        # Yalnızca görünür satın alma kutusundaki gerçek ödeme fiyatını kabul et.
+        # Generic JSON-LD / eski priceblock alanları 70 TL gibi sahte/stale değerler üretebiliyor.
+        selectors=[
             '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
-            '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
-            '#corePrice_desktop .a-price .a-offscreen'
-        ],
+            '#corePriceDisplay_desktop_feature_div .priceToPay .a-price-whole',
+            '#corePriceDisplay_desktop_feature_div .priceToPay .a-price',
+        ]
+        for sel in selectors:
+            for el in soup.select(sel):
+                raw=el.get('content') or el.get('value') or el.get_text(' ',strip=True)
+                x=money(raw)
+                if x and x>1:return x
+        return None
+    selectors={
         'Hepsiburada':['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]'],
         'Trendyol':['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]']
     }
-    # Amazon'daki eski/gizli #priceblock_* alanlarını bilerek kullanmıyoruz.
-    # Bu alanlar bazı ürünlerde artık geçerli olmayan 90 TL gibi değerler taşıyabiliyor.
     for sel in selectors.get(site,[]):
         for el in soup.select(sel):
             raw=el.get('content') or el.get('value') or el.get_text(' ',strip=True)
@@ -36,7 +43,7 @@ _ORIGINAL_FINAL_VERIFY=verify
 def _bahadir_final_verify(page,site,url,fallback_title,expected_current,candidate_previous):
     try:
         page.goto(url,wait_until='domcontentloaded',timeout=9000)
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(700)
         live=_bahadir_authoritative_live_price(site,url,page)
         if live is None:
             print(f'FINAL FİYAT YOK | {site} | RED | {url}')
@@ -76,6 +83,30 @@ verify=_bahadir_final_verify
     s=s.replace(marker,guard+marker,1)
     P.write_text(s,encoding='utf-8')
     compile(s,str(P),'exec')
-    print('FINAL PRICE GUARD OK | stale Amazon priceblock fallback removed')
+    print('FINAL PRICE GUARD OK | Amazon only visible priceToPay accepted')
 else:
-    print('FINAL PRICE GUARD zaten uygulanmış')
+    # Existing guard was too permissive; replace its authoritative price function.
+    start=s.index('def _bahadir_authoritative_live_price')
+    end=s.index('\n_ORIGINAL_FINAL_VERIFY=',start)
+    new=r'''def _bahadir_authoritative_live_price(site,url,page):
+    soup=BeautifulSoup(page.content(),'html.parser')
+    if site=='Amazon':
+        selectors=['#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen','#corePriceDisplay_desktop_feature_div .priceToPay .a-price-whole','#corePriceDisplay_desktop_feature_div .priceToPay .a-price']
+        for sel in selectors:
+            for el in soup.select(sel):
+                raw=el.get('content') or el.get('value') or el.get_text(' ',strip=True)
+                x=money(raw)
+                if x and x>1:return x
+        return None
+    selectors={'Hepsiburada':['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]'],'Trendyol':['meta[property="product:price:amount"]','meta[itemprop="price"]','[itemprop="price"]']}
+    for sel in selectors.get(site,[]):
+        for el in soup.select(sel):
+            raw=el.get('content') or el.get('value') or el.get('data-price') or el.get_text(' ',strip=True)
+            x=money(raw)
+            if x and x>1:return x
+    return None
+'''
+    s=s[:start]+new+s[end:]
+    P.write_text(s,encoding='utf-8')
+    compile(s,str(P),'exec')
+    print('FINAL PRICE GUARD UPDATED | Amazon only visible priceToPay accepted')
