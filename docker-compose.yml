@@ -1,7 +1,7 @@
 services:
-  indirim-bot:
+  serper-bot:
     build: .
-    container_name: bahadir-indirim-bot
+    container_name: bahadir-serper-bot
     restart: unless-stopped
     env_file:
       - .env
@@ -10,4 +10,16 @@ services:
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_all.py; code=$$?; echo "Bot turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
+      sh -c 'while true; do python run_serper.py; code=$$?; echo "Serper turu bitti (kod=$$code). ${SCAN_INTERVAL:-1800} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-1800}; done'
+
+  telegram-bot:
+    build: .
+    container_name: bahadir-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-60}
+      TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-10}
+    command: >-
+      sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
