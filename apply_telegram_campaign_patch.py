@@ -2,14 +2,11 @@ from pathlib import Path
 
 p = Path('telegram_sources.py')
 s = p.read_text(encoding='utf-8')
-
 marker = 'def send(s,u,t,c,p,source,post_id,signal,coupon=None):'
 if marker not in s:
     raise SystemExit('send fonksiyonu bulunamadı')
-
 helper = r'''
 def extract_campaign(text):
-    """Kaynak mesajındaki Amazon/marketplace kampanya cümlelerini yakalar."""
     if not text:
         return None
     clean = re.sub(r'\s+', ' ', htmlmod.unescape(text)).strip()
@@ -27,9 +24,7 @@ def extract_campaign(text):
                 return value[:280]
     return None
 
-
 def page_campaign(u):
-    """Ürün sayfasında kaynak mesajında olmayan kampanya bilgisini ara."""
     try:
         r = requests.get(u, headers=HEAD, timeout=8)
         if r.status_code >= 400:
@@ -54,13 +49,11 @@ def page_campaign(u):
 '''
 if 'def extract_campaign(' not in s:
     s = s.replace(marker, helper + marker, 1)
-
 old = "    if coupon:lines.append(f'🎟️ Kupon: {coupon}')\n    lines+=['','👇 Fırsata git']"
-new = "    if coupon:lines.append(f'🎟️ Kupon: {coupon}')\n    campaign = extract_campaign(signal) or page_campaign(u)\n    if campaign:\n        lines.append(f'🎯 Kampanya: {campaign}')\n    lines+=['','👇 Fırsata git']"
+new = "    if coupon:lines.append(f'🎟️ Kupon: {coupon}')\n    if not any(str(x).startswith('🎯 Kampanya:') for x in lines):\n        campaign = extract_campaign(signal) or page_campaign(u)\n        if campaign:\n            lines.append(f'🎯 Kampanya: {campaign}')\n    lines+=['','👇 Fırsata git']"
 if old not in s:
     raise SystemExit('send kampanya satırı beklenen yerde bulunamadı')
 s = s.replace(old, new, 1)
-
 p.write_text(s, encoding='utf-8')
 compile(s, str(p), 'exec')
-print('Telegram campaign extraction + product-page campaign fallback OK')
+print('Telegram campaign extraction + product-page campaign fallback OK | duplicate-safe')
