@@ -108,17 +108,14 @@ def inspect_page(url,expected=None):
 def choose_reference(current,history=None,source=None,page=None,market_median=None,market_floor=None):
     raw_history=[float(x) for x in (history or []) if x and current*.70<=float(x)<=current*1.80]
     stable=[x for x in raw_history if abs(x-current)/max(current,1)<=0.05]
-    # If we have several observations clustered around today's price, this is not a fresh deal.
-    # Do not let an inflated list/source price manufacture a large discount.
+    # Three or more recent observations around today's price means the price is established,
+    # not a fresh deal. Never allow an inflated source/list price to override this signal.
     if len(stable)>=3 and len(stable)>=max(3,int(len(raw_history)*0.60)):
-        if not page or page<=current*1.10:
-            return None,'stable-price-history'
+        return None,'stable-price-history'
 
     high_history=[x for x in raw_history if current*1.03<x<=current*1.8]
     hist=min(high_history) if high_history else None
     local=[float(x) for x in (hist,source,page) if x and current*1.03<float(x)<=current*1.8]
-    # Conservative rule: use the LOWEST credible reference, never the median/highest.
-    # Example: page says 15,299 while a source claims 21,999 -> 15,299 wins.
     local_ref=min(local) if local else None
 
     if market_floor and current>market_floor*1.05:return None,'market-blocked'
