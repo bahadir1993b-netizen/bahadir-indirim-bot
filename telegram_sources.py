@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 TOKEN=os.environ['TELEGRAM_BOT_TOKEN']; SB=os.environ['SUPABASE_URL'].rstrip('/'); KEY=os.environ['SUPABASE_SERVICE_KEY']; CHAT='-1004424116637'
+if SB.endswith('/rest/v1'): SB=SB[:-8].rstrip('/')
 MAX_AGE=30
 MIN_DISCOUNT=6.0
 COOLDOWN=12
