@@ -6,6 +6,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       SCAN_INTERVAL: ${SCAN_INTERVAL:-600}
       DIRECT_MAX_PRODUCTS: ${DIRECT_MAX_PRODUCTS:-160}
       DIRECT_BROWSER_LIMIT: ${DIRECT_BROWSER_LIMIT:-48}
@@ -25,6 +26,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-60}
       TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-180}
       LOCAL_PRICE_DB: /app/data/price_memory.db
@@ -42,6 +44,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       FAST_LANE_INTERVAL: ${FAST_LANE_INTERVAL:-30}
       FAST_LANE_MAX_AGE: ${FAST_LANE_MAX_AGE:-60}
       FAST_LANE_MIN_DISCOUNT: ${FAST_LANE_MIN_DISCOUNT:-5}
@@ -58,6 +61,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       WEB_FIRST_INTERVAL: ${WEB_FIRST_INTERVAL:-120}
       WEB_FIRST_MIN_DISCOUNT: ${WEB_FIRST_MIN_DISCOUNT:-15}
       WEB_FIRST_MAX_CHECK: ${WEB_FIRST_MAX_CHECK:-180}
@@ -75,6 +79,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       PRICE_SAMPLE_INTERVAL: ${PRICE_SAMPLE_INTERVAL:-180}
       PRICE_SAMPLE_LIMIT: ${PRICE_SAMPLE_LIMIT:-600}
@@ -96,6 +101,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       ANALYST_INTERVAL: ${ANALYST_INTERVAL:-300}
       ANALYST_MAX_ALERTS: ${ANALYST_MAX_ALERTS:-4}
@@ -112,6 +118,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       HARVEST_INTERVAL: ${HARVEST_INTERVAL:-600}
       HARVEST_PAGES_PER_RUN: ${HARVEST_PAGES_PER_RUN:-40}
@@ -130,6 +137,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       ONUAL_INTERVAL: ${ONUAL_INTERVAL:-600}
       ONUAL_PAGES_PER_RUN: ${ONUAL_PAGES_PER_RUN:-60}
@@ -145,6 +153,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       AKAKCE_INTERVAL: ${AKAKCE_INTERVAL:-600}
       AKAKCE_LIMIT: ${AKAKCE_LIMIT:-120}
@@ -161,6 +170,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       GOOGLE_SHOPPING_INTERVAL: ${GOOGLE_SHOPPING_INTERVAL:-1800}
       GOOGLE_SHOPPING_LIMIT: ${GOOGLE_SHOPPING_LIMIT:-30}
@@ -179,6 +189,7 @@ services:
     env_file:
       - .env
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_SEED_INTERVAL: ${SERPER_SEED_INTERVAL:-21600}
       SERPER_SEED_QUERIES: ${SERPER_SEED_QUERIES:-12}
