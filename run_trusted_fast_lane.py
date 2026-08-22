@@ -10,12 +10,12 @@ TRUSTED={'OzelFirsatlar','AmazonOzel','FirsatMerkezi'}
 MAX_AGE=max(3,int(os.environ.get('FAST_LANE_MAX_AGE','20')))
 MIN_DISC=max(3.0,float(os.environ.get('FAST_LANE_MIN_DISCOUNT','5')))
 HEAD=dict(ts.HEAD);HEAD.update({'Cache-Control':'no-cache, no-store, max-age=0','Pragma':'no-cache'})
+SHORT_HOSTS={'app.hb.biz':'Hepsiburada','hps.im':'Hepsiburada','ty.gl':'Trendyol','trendyol.app.link':'Trendyol','n11.mn':'N11','amzn.to':'Amazon'}
 
 def fmt(x):return f'{x:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
 def fast_key(source,post_id):return f'fast:{source}:{post_id}'
 def clean_title(raw):
     s=raw or ''
-    # Kaynak kanal başlıklarını ve kendi imzalarını ürün adına taşımıyoruz.
     s=re.sub(r'(?i)^\s*(?:ÖZEL\s+FIRSATLAR\s*-\s*Güncel\s+İndirimler|Amazon\s+İndirimleri\s*-\s*Özel\s+Fırsatlar|Fırsat\s+Merkezi)\s*',' ',s)
     s=re.sub(r'@[A-Za-z0-9_]+|#(?:tanıtım|tanitim|reklam)',' ',s,flags=re.I)
     s=re.sub(r'(?i)\b(?:sohbet grubumuz|kanalımıza katıl|takip et|reklam)\b.*$',' ',s)
@@ -38,12 +38,16 @@ def local_meta(url):
     except:pass
     return 'Fırsat Ürünü',''
 
+def _short_site(u):
+    try:return SHORT_HOSTS.get(urlparse(u or '').netloc.lower().split(':')[0])
+    except:return None
+
 def _direct_from_response(resp,site):
     try:
         final=ts.clean(resp.url)
         if ts.site(final)==site and ts.valid(site,final):return ts.normalize(site,final)
-        soup=BeautifulSoup(resp.text or '','html.parser')
-        # Canonical / og:url / açık ürün linkleri
+        body=html.unescape((resp.text or '').replace('\\/','/'))
+        soup=BeautifulSoup(body,'html.parser')
         for sel,attr in [('link[rel="canonical"]','href'),('meta[property="og:url"]','content')]:
             el=soup.select_one(sel)
             if el:
@@ -52,30 +56,32 @@ def _direct_from_response(resp,site):
         for a in soup.select('a[href]'):
             u=urljoin(final,a.get('href') or '')
             if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
-        # Bazı kısa link servisleri meta refresh döndürüyor.
         meta=soup.select_one('meta[http-equiv]')
         if meta and (meta.get('http-equiv') or '').lower()=='refresh':
             m=re.search(r'url\s*=\s*([^;]+)$',meta.get('content') or '',re.I)
             if m:
                 u=urljoin(final,m.group(1).strip(' \"\''))
                 if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
+        # JS/deeplink sayfalarında gömülü gerçek mağaza URL'sini tara.
+        for m in re.finditer(r'https?://[^\s\"\'<>]+',body,re.I):
+            u=ts.clean(m.group(0).rstrip('),;'))
+            if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
     except Exception:pass
     return None
 
 def _resolve_short(site,x):
-    # Önce ortak resolver.
     try:
         u=ts.http_resolve(x,site)
         if u:return u
     except Exception:pass
-    # app.hb.biz gibi linkler bazen farklı davranıyor; GET/HEAD ve HTML hedeflerini ayrıca dene.
-    for method in ('get','head'):
-        try:
-            fn=getattr(requests,method)
-            r=fn(x,headers=HEAD,timeout=5,allow_redirects=True)
-            u=_direct_from_response(r,site)
-            if u:return u
-        except Exception:pass
+    headers_list=[HEAD,dict(HEAD,**{'User-Agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1'})]
+    for headers in headers_list:
+        for method in ('get','head'):
+            try:
+                r=getattr(requests,method)(x,headers=headers,timeout=6,allow_redirects=True)
+                u=_direct_from_response(r,site)
+                if u:return u
+            except Exception:pass
     return None
 
 def _search_store(site,title):
@@ -83,7 +89,6 @@ def _search_store(site,title):
         u=ts.search_marketplace_http(site,title)
         if u:return u
     except Exception:pass
-    # Hepsiburada araması için relative href fallback'i.
     if site=='Hepsiburada' and title and title!='Fırsat Ürünü':
         try:
             q=requests.utils.quote(title[:140]);base='https://www.hepsiburada.com/ara?q='+q
@@ -108,13 +113,34 @@ def resolve_product_url(site,links,title):
                 u=ts.normalize(site,x)
                 if u:return u
         except Exception:pass
+    short_fallback=None
     for x in links:
         try:
-            if ts.site(x)==site:
+            xs=_short_site(x) or ts.site(x)
+            if xs==site:
+                if _short_site(x):short_fallback=x
                 u=_resolve_short(site,x)
                 if u:return u
         except Exception:pass
-    return _search_store(site,title)
+    u=_search_store(site,title)
+    if u:return u
+    # Güvenilir Telegram fırsatını yalnızca canonical URL çözülemedi diye kaçırma.
+    # Amazon'da affiliate zorunlu olduğu için kısa link fallback kullanılmaz.
+    if short_fallback and site!='Amazon':
+        print(f'FAST LINK FALLBACK | {site} | {short_fallback}')
+        return short_fallback
+    return None
+
+def _meta_from_url(url):
+    try:
+        r=requests.get(url,headers=HEAD,timeout=6,allow_redirects=True)
+        body=r.text or '';soup=BeautifulSoup(body,'html.parser');title='';image=''
+        e=soup.select_one('meta[property="og:title"]') or soup.select_one('h1')
+        if e:title=clean_title(e.get('content') if e.name=='meta' else e.get_text(' ',strip=True))
+        e=soup.select_one('meta[property="og:image"]') or soup.select_one('meta[name="twitter:image"]')
+        if e:image=e.get('content') or ''
+        return title,image
+    except:return 'Fırsat Ürünü',''
 
 def send(site,url,title,current,ref,campaign,image,row):
     disc=(ref-current)/ref*100 if ref and ref>current else None
@@ -138,16 +164,18 @@ def process(source,b):
     tx=b.select_one('.tgme_widget_message_text')
     if not tx:return False
     raw=tx.get_text(' ',strip=True);links=[ts.clean(a.get('href') or '') for a in b.select('a[href]')];title=clean_title(raw);cur,old=ts.source_pair(raw)
-    site=next((ts.site(x) for x in links if ts.site(x)),None)
+    site=next((ts.site(x) or _short_site(x) for x in links if (ts.site(x) or _short_site(x))),None)
     u=resolve_product_url(site,links,title) if site else None
     if not site or not cur or not u:
         print(f'FAST ATLANDI | {source}:{post_id} | eksik_temel | site={site} fiyat={cur} link={bool(u)} | başlık={title[:70]}');return False
     pg=inspect_page(u,cur) or {}
     if pg.get('available') is False:ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | stok_yok');return False
     local_title,local_image=local_meta(u);page_title=clean_title(pg.get('title') or '')
+    short_title,short_image=_meta_from_url(u) if (_short_site(u) and (page_title=='Fırsat Ürünü' or not pg.get('image'))) else ('Fırsat Ürünü','')
     if page_title!='Fırsat Ürünü':title=page_title
+    elif short_title!='Fırsat Ürünü':title=short_title
     elif title=='Fırsat Ürünü' and local_title!='Fırsat Ürünü':title=local_title
-    image=pg.get('image') or local_image
+    image=pg.get('image') or short_image or local_image
     if title=='Fırsat Ürünü':print(f'FAST BEKLET | {source}:{post_id} | ürün_adı_alınamadı | foto={"var" if image else "yok"}');return False
     live=pg.get('live');campaign=pg.get('campaign');effective=float(cur);label=None
     if campaign and campaign.get('effective'):effective=float(campaign['effective']);label=campaign.get('label')
