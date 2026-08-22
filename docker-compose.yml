@@ -43,17 +43,18 @@ services:
       - .env
     environment:
       LOCAL_PRICE_DB: /app/data/price_memory.db
-      PRICE_SAMPLE_INTERVAL: ${PRICE_SAMPLE_INTERVAL:-300}
-      PRICE_SAMPLE_LIMIT: ${PRICE_SAMPLE_LIMIT:-450}
-      PRICE_SAMPLE_BROWSER_LIMIT: ${PRICE_SAMPLE_BROWSER_LIMIT:-80}
-      PRICE_SAMPLE_SLEEP: ${PRICE_SAMPLE_SLEEP:-0.10}
+      PRICE_SAMPLE_INTERVAL: ${PRICE_SAMPLE_INTERVAL:-180}
+      PRICE_SAMPLE_LIMIT: ${PRICE_SAMPLE_LIMIT:-600}
+      PRICE_SAMPLE_BROWSER_LIMIT: ${PRICE_SAMPLE_BROWSER_LIMIT:-120}
+      PRICE_SAMPLE_PRIORITY_SHARE: ${PRICE_SAMPLE_PRIORITY_SHARE:-0.70}
+      PRICE_SAMPLE_SLEEP: ${PRICE_SAMPLE_SLEEP:-0.08}
       PRICE_SAMPLE_DEAL_PCT: ${PRICE_SAMPLE_DEAL_PCT:-15}
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
     volumes:
       - ./data:/app/data
     command: >-
-      sh -c 'while true; do python run_price_sampler.py; code=$$?; echo "Sürekli fiyat örnekleme bitti (kod=$$code). ${PRICE_SAMPLE_INTERVAL:-300} sn sonra tekrar."; sleep ${PRICE_SAMPLE_INTERVAL:-300}; done'
+      sh -c 'while true; do python run_price_sampler.py; code=$$?; echo "Sürekli fiyat örnekleme bitti (kod=$$code). ${PRICE_SAMPLE_INTERVAL:-180} sn sonra tekrar."; sleep ${PRICE_SAMPLE_INTERVAL:-180}; done'
 
   price-analyst:
     build: .
