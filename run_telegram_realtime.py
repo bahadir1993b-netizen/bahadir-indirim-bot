@@ -105,6 +105,23 @@ def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None,campaign=None,page_im
     if isinstance(row,dict) and row.get('id'):ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
     ts.remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL | ref={p or 0:.2f} | kaynak={ref_source} | kampanya={campaign.get("label") if campaign else "yok"} | foto={"var" if photo else "yok"}');return True
 
+def _infer_quantity_campaign(signal,source_price,live):
+    if not live or not source_price or source_price>=live*.97:return None
+    m=re.search(r'\b(\d+)\s*(?:adet\s*)?(?:alımda|alimda)(?:\s+geçerli|\s+gecerli)?\b',signal or '',re.I)
+    if not m:
+        m=re.search(r'\b(\d+)\s*adet\b',signal or '',re.I)
+    if not m:return None
+    qty=int(m.group(1))
+    if qty<2 or qty>10:return None
+    best=None
+    for paid in range(1,qty):
+        eff=live*paid/qty
+        err=abs(source_price-eff)/max(eff,1)
+        if err<=.10 and (best is None or err<best[0]):best=(err,paid,eff)
+    if not best:return None
+    _,paid,eff=best
+    return {'label':f'{qty} al {paid} öde','qty':qty,'effective':source_price,'verified_effective':eff}
+
 def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
     key=f'{source}:{post_id}'
     if ts.seen(key):return False
@@ -122,21 +139,29 @@ def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
             if pc:live=pc
             if po and not pg.get('old'):pg['old']=po
         except Exception:pass
-    if campaign and campaign.get('effective'):
-        eff=float(campaign['effective'])
-        if abs(c-eff)/max(eff,1)<=0.08:current=eff
-        elif live:current=live
+
+    inferred=_infer_quantity_campaign(signal_clean,c,live)
+    if inferred:
+        current=c;campaign=inferred;page_ref=live;ref_source='source-qty-verified'
+    else:
+        if campaign and campaign.get('effective'):
+            eff=float(campaign['effective'])
+            if abs(c-eff)/max(eff,1)<=0.08:current=eff
+            elif live:current=live
+            else:current=c
+        elif live:current=live if abs(live-c)/max(live,1)>0.03 else c
         else:current=c
-    elif live:current=live if abs(live-c)/max(live,1)>0.03 else c
-    else:current=c
+        page_ref=(live if campaign and live and live>current else pg.get('old'))
+        ref_source=None
+
     hist=own_history(u,current)
     if API_FREE:
         floor=med=None;n=0;msrc='api-free'
     else:
         try:floor,med,n,msrc=market_snapshot(t)
         except Exception:floor=med=None;n=0;msrc='market-error'
-    page_ref=(live if campaign and live and live>current else pg.get('old'))
-    ref,ref_source=choose_reference(current,history=hist,source=p,page=page_ref,market_median=med,market_floor=floor)
+    ref,chosen_source=choose_reference(current,history=hist,source=p,page=page_ref,market_median=med,market_floor=floor)
+    if ref_source is None:ref_source=chosen_source
     print(f'DOĞRULAMA | {source}:{post_id} | kaynak_fiyat={c:.2f} canlı={live or 0:.2f} efektif={campaign.get("effective") if campaign else 0} geçmiş={len(hist)} piyasa={med or 0:.2f} kaynak_ref={p or 0:.2f} seçilen_ref={ref or 0:.2f} | {ref_source}/{msrc}')
     if not ref or ref<=current:
         m=re.search(r'\b(\d+)\s*al\s*(\d+)\s*(?:öde|ode)\b',signal_clean,re.I)
@@ -144,6 +169,8 @@ def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
             buy,paid=int(m.group(1)),int(m.group(2))
             if buy>paid>0:
                 current=live*paid/buy;ref=live;campaign={'label':f'{buy} al {paid} öde','qty':buy,'effective':current};ref_source='page-campaign'
+    if inferred and live and (not ref or ref<=current):
+        ref=live;ref_source='source-qty-verified'
     if not ref or ref<=current:
         print(f'ATLANDI | {source}:{post_id} | güvenilir referans yok');ts.remember(key);return False
     disc=(ref-current)/ref*100
