@@ -33,7 +33,21 @@ def already(k,p):
     if not r:return False
     try:dt=datetime.fromisoformat(r['alerted_at'].replace('Z','+00:00'))
     except:return False
-    return (datetime.now(timezone.utc)-dt)<timedelta(hours=12) and abs(float(r['price'])-p)/max(p,1)<.02
+    age=datetime.now(timezone.utc)-dt;old=float(r['price'])
+    if age<timedelta(days=30) and p>=old*.95:return True
+    return False
+
+def stable_recent(k,p):
+    c=conn();since=(datetime.now(timezone.utc)-timedelta(days=14)).isoformat()
+    rows=c.execute('SELECT price FROM title_prices WHERE title_key=? AND recorded_at>=? ORDER BY recorded_at DESC LIMIT 200',(k,since)).fetchall();c.close()
+    vals=[]
+    for r in rows:
+        try:x=float(r['price'])
+        except:continue
+        if x>0:vals.append(x)
+    if len(vals)<4:return False
+    near=[x for x in vals if abs(x-p)/max(p,1)<=.05]
+    return len(near)>=4 and len(near)>=int(len(vals)*.60)
 
 def mark(k,p):
     c=conn();c.execute('INSERT INTO analyst_alerts(title_key,price,alerted_at) VALUES(?,?,?) ON CONFLICT(title_key) DO UPDATE SET price=excluded.price,alerted_at=excluded.alerted_at',(k,p,datetime.now(timezone.utc).isoformat()));c.commit();c.close()
@@ -41,9 +55,9 @@ def mark(k,p):
 def send(title,current,ref,url,source):
     if not TOKEN or not CHANNEL:return False
     disc=(ref-current)/ref*100;site=site_of(url);u=outlink(url)
-    text='\n'.join([f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title[:260])}',f'💰 {fmt(current)} TL',f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site or source}','','👇 <a href="'+html.escape(u,quote=True)+'"><b>Fırsata git</b></a>'])
+    text='\n'.join([f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title[:180])}',f'💰 {fmt(current)} TL',f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site or source}','','👇 <a href="'+html.escape(u,quote=True)+'"><b>Fırsata git</b></a>'])
     kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
-    r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL,'text':text,'parse_mode':'HTML','reply_markup':kb},timeout=15)
+    r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'reply_markup':kb},timeout=15)
     return r.ok
 
 def main():
@@ -60,17 +74,19 @@ def main():
         kind=(r.get('source_kind') or '').lower();url=r.get('product_url') or ''
         if 'telegram' not in kind and 'deal' not in kind:continue
         if site_of(url) not in {'Amazon','Hepsiburada','Trendyol'}:continue
-        current=float(r['price']);bases=[x for x in [p.get('normal_30'),p.get('normal_90')] if x and x>current*1.03]
+        current=float(r['price'])
+        if stable_recent(k,current):
+            print(f'ANALİST ATLANDI | stable-price-history | {current:.2f} | {str(r.get("title"))[:70]}');continue
+        bases=[x for x in [p.get('normal_30'),p.get('normal_90')] if x and x>current*1.03]
         old=r.get('old_price')
         if old:
             try:
                 old=float(old)
-                if current*1.03<old<=current*2.5:bases.append(old)
+                if current*1.03<old<=current*1.45:bases.append(old)
             except:pass
         if not bases:continue
         ref=min(bases);disc=(ref-current)/ref*100
         floor=p.get('deal_floor_120')
-        # recent deal floors are a veto unless today's price is essentially at the floor
         if floor and current>float(floor)*1.05:continue
         if disc>=MIN and not already(k,current):signals.append((disc,p,r,current,ref))
     signals.sort(key=lambda x:x[0],reverse=True);sent=0
