@@ -9,7 +9,9 @@ LIMIT=max(20,int(os.environ.get('PRICE_SAMPLE_LIMIT','220')))
 SLEEP=max(0.05,float(os.environ.get('PRICE_SAMPLE_SLEEP','0.15')))
 DEAL_PCT=max(5.0,float(os.environ.get('PRICE_SAMPLE_DEAL_PCT','15')))
 BROWSER_LIMIT=max(0,int(os.environ.get('PRICE_SAMPLE_BROWSER_LIMIT','80')))
-CURSOR_KEY='price-sampler-index'
+PRIORITY_SHARE=min(.90,max(.20,float(os.environ.get('PRICE_SAMPLE_PRIORITY_SHARE','0.70'))))
+CURSOR_KEY='price-sampler-index-v2'
+PRIORITY_SITES={'Hepsiburada','Trendyol'}
 
 BAD_TITLE_PARTS=('ürün özeti','temel ürün bilgilerini','klavye kısayolu','shift + alt','amazon.com.tr','bu sayfada ara','tam görünümü görmek için','javascript:void','müşteri yorumları')
 
@@ -24,14 +26,12 @@ def clean_title(s):
 def good_title(s):
     s=clean_title(s);low=s.lower()
     if len(s)<8 or any(x in low for x in BAD_TITLE_PARTS):return False
-    # gerçek ürün başlıklarında genellikle en az iki anlamlı kelime vardır
     toks=re.findall(r'[A-Za-zÇĞİÖŞÜçğıöşü0-9]{2,}',s)
     return len(toks)>=2
 
 def choose_title(page_title,catalog_title):
     p=clean_title(page_title);c=clean_title(catalog_title)
     if good_title(p):
-        # çok kısa/generic sayfa başlığı yerine elimizdeki daha ayrıntılı katalog adını koru
         if good_title(c) and len(p)<18 and len(c)>len(p)*1.8:return c
         return p
     return c if good_title(c) else 'Ürün'
@@ -51,22 +51,46 @@ def baseline(title,current):
         q1=int(len(vals)*0.15);q2=max(q1+1,int(len(vals)*0.85));vals=vals[q1:q2]
     return float(statistics.median(vals)) if vals else None
 
+def _site(row):
+    return (row.get('site') or '').strip()
+
+def _rotate(rows,start,count):
+    if not rows or count<=0:return []
+    n=len(rows);return [rows[(start+i)%n] for i in range(min(count,n))]
+
+def pick_products(products,start):
+    priority=[r for r in products if _site(r) in PRIORITY_SITES]
+    regular=[r for r in products if _site(r) not in PRIORITY_SITES]
+    pcount=min(len(priority),max(1,int(LIMIT*PRIORITY_SHARE))) if priority else 0
+    rcount=min(len(regular),max(0,LIMIT-pcount))
+    if pcount+r_count if False else False: pass
+    picked=_rotate(priority,start,pcount)
+    picked+=_rotate(regular,start//2,rcount)
+    if len(picked)<min(LIMIT,len(products)):
+        used={id(x) for x in picked}
+        for r in _rotate(products,start,LIMIT):
+            if id(r) in used:continue
+            picked.append(r);used.add(id(r))
+            if len(picked)>=min(LIMIT,len(products)):break
+    return picked,len(priority),len(regular)
+
 def main():
     products=ls.list_products(100000)
     if not products:
         print('=== SÜREKLİ FİYAT ÖRNEKLEME | katalog=0 ===');return
     try:start=int(ar.cursor_get(CURSOR_KEY) or 0)
     except:start=0
-    picked=[];n=len(products)
-    for i in range(min(LIMIT,n)):picked.append(products[(start+i)%n])
-    next_idx=(start+len(picked))%n
-    ok=fail=normal=deal=changed=browser_used=bad_titles=0
-    print(f'=== SÜREKLİ FİYAT ÖRNEKLEME V3 | katalog={n} | tur={len(picked)} | browser_limit={BROWSER_LIMIT} | başlangıç={start} ===')
+    picked,priority_total,regular_total=pick_products(products,start)
+    next_idx=(start+max(1,len(picked)))%max(1,len(products))
+
+    ok=fail=normal=deal=changed=browser_used=bad_titles=priority_checked=0
+    print(f'=== SÜREKLİ FİYAT ÖRNEKLEME V4 | katalog={len(products)} | tur={len(picked)} | HB+TY_katalog={priority_total} | öncelik_payı=%{PRIORITY_SHARE*100:.0f} | browser_limit={BROWSER_LIMIT} | başlangıç={start} ===')
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled']) if BROWSER_LIMIT else None
         page=browser.new_page() if browser else None
         for row in picked:
             url=row.get('url') or '';title=row.get('title') or 'Ürün';site=row.get('site') or ''
+            if site in PRIORITY_SITES:priority_checked+=1
             expected=num(row.get('last_price'))
             try:info=v2.http_check(url,expected)
             except Exception:info=None
@@ -94,6 +118,6 @@ def main():
             time.sleep(SLEEP)
         if browser:browser.close()
     ar.cursor_set(CURSOR_KEY,next_idx)
-    print(f'=== ÖRNEKLEME BİTTİ | başarılı={ok} | fiyat_yok={fail} | normal={normal} | fırsat={deal} | değişen={changed} | browser={browser_used} | kirli_başlık_engel={bad_titles} | sonraki={next_idx} | arsiv={ar.stats()} ===')
+    print(f'=== ÖRNEKLEME BİTTİ | başarılı={ok} | fiyat_yok={fail} | normal={normal} | fırsat={deal} | değişen={changed} | HB+TY_kontrol={priority_checked} | browser={browser_used} | kirli_başlık_engel={bad_titles} | sonraki={next_idx} | arsiv={ar.stats()} ===')
 
 if __name__=='__main__':main()
