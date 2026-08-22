@@ -54,6 +54,25 @@ def campaign_from_text(text,base_price=None):
     best=sorted(campaigns,key=lambda x:((x.get('effective') is not None),x.get('priority',0),-(x.get('effective') or 10**9)),reverse=True)[0] if campaigns else None
     return {'best':best,'all':campaigns,'effective':best.get('effective') if best else None,'qty':best.get('qty') if best else None}
 
+def _product_image(soup):
+    # Satış sayfasındaki gerçek ürün görselini tercih et.
+    selectors=[
+        ('#landingImage','data-old-hires'),('#landingImage','src'),
+        ('#imgBlkFront','data-a-dynamic-image'),('#imgBlkFront','src'),
+        ('img[data-old-hires]','data-old-hires'),('img[data-a-dynamic-image]','data-a-dynamic-image'),
+        ('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('img[itemprop="image"]','src')
+    ]
+    for sel,attr in selectors:
+        e=soup.select_one(sel)
+        if not e:continue
+        v=e.get(attr) or ''
+        if attr=='data-a-dynamic-image' and v:
+            try:
+                obj=json.loads(v);v=max(obj.items(),key=lambda kv:(kv[1][0] if isinstance(kv[1],list) and kv[1] else 0))[0] if obj else ''
+            except Exception:v=''
+        if isinstance(v,str) and v.startswith('http'):return v
+    return ''
+
 def inspect_page(url,expected=None):
     out={'ok':False,'available':None,'live':None,'old':None,'title':'','image':'','campaign':None,'campaigns':[],'text':''}
     try:
@@ -78,9 +97,7 @@ def inspect_page(url,expected=None):
             if e:
                 out['title']=re.sub(r'\s+',' ',(e.get(attr) if attr else e.get_text(' ',strip=True)) or '').strip()[:300]
                 if out['title']:break
-        for sel,attr in [('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('img[itemprop="image"]','src')]:
-            e=soup.select_one(sel)
-            if e and (e.get(attr) or '').startswith('http'):out['image']=e.get(attr);break
+        out['image']=_product_image(soup)
         live=[];old=[]
         selectors=[('meta[property="product:price:amount"]','content'),('meta[itemprop="price"]','content'),('[itemprop="price"]','content'),('.a-price .a-offscreen',None),('.apexPriceToPay .a-offscreen',None),('[data-test-id="price-current-price"]',None),('[class*="currentPrice"]',None),('[class*="salePrice"]',None),('.prc-dsc',None),('.prc-slg',None)]
         for sel,attr in selectors:
@@ -108,16 +125,12 @@ def inspect_page(url,expected=None):
 def choose_reference(current,history=None,source=None,page=None,market_median=None,market_floor=None):
     raw_history=[float(x) for x in (history or []) if x and current*.70<=float(x)<=current*1.80]
     stable=[x for x in raw_history if abs(x-current)/max(current,1)<=0.05]
-    # Three or more recent observations around today's price means the price is established,
-    # not a fresh deal. Never allow an inflated source/list price to override this signal.
     if len(stable)>=3 and len(stable)>=max(3,int(len(raw_history)*0.60)):
         return None,'stable-price-history'
-
     high_history=[x for x in raw_history if current*1.03<x<=current*1.8]
     hist=min(high_history) if high_history else None
     local=[float(x) for x in (hist,source,page) if x and current*1.03<float(x)<=current*1.8]
     local_ref=min(local) if local else None
-
     if market_floor and current>market_floor*1.05:return None,'market-blocked'
     if local_ref:
         if market_median and market_median>current*1.03:return min(local_ref,float(market_median)),'market+history'
