@@ -43,7 +43,7 @@ services:
       - .env
     environment:
       FAST_LANE_INTERVAL: ${FAST_LANE_INTERVAL:-30}
-      FAST_LANE_MAX_AGE: ${FAST_LANE_MAX_AGE:-12}
+      FAST_LANE_MAX_AGE: ${FAST_LANE_MAX_AGE:-60}
       FAST_LANE_MIN_DISCOUNT: ${FAST_LANE_MIN_DISCOUNT:-5}
       LOCAL_PRICE_DB: /app/data/price_memory.db
     volumes:
