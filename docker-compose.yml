@@ -49,6 +49,7 @@ services:
     restart: unless-stopped
     env_file: [.env]
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       WEB_FIRST_INTERVAL: ${WEB_FIRST_INTERVAL:-120}
       WEB_FIRST_MIN_DISCOUNT: ${WEB_FIRST_MIN_DISCOUNT:-15}
       WEB_FIRST_MAX_CHECK: ${WEB_FIRST_MAX_CHECK:-180}
@@ -78,6 +79,7 @@ services:
     restart: unless-stopped
     env_file: [.env]
     environment:
+      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       ANALYST_INTERVAL: ${ANALYST_INTERVAL:-300}
       ANALYST_MAX_ALERTS: ${ANALYST_MAX_ALERTS:-4}
