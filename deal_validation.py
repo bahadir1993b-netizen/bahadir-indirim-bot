@@ -30,8 +30,6 @@ def campaign_from_text(text,base_price=None):
         if buy>paid>0:
             eff=base_price*paid/buy if base_price else None
             campaigns.append({'label':f'{buy} al {paid} öde','qty':buy,'effective':eff,'priority':100})
-
-    # Examples: "2 adet satın alın, 1 adette %50 indirim" / "2. üründe %50 indirim".
     patterns=[
         r'(\d+)\s*adet\s*(?:satın\s*al(?:ın|in)?|alin).*?(\d+)\s*(?:\.\s*)?adette?\s*(?:geçerli\s*)?%\s*(\d{1,2})\s*indirim',
         r'(\d+)\s*(?:\.\s*)?(?:üründe|urunde|ürüne|urune)\s*%\s*(\d{1,2})\s*indirim',
@@ -49,7 +47,6 @@ def campaign_from_text(text,base_price=None):
             if base_price and nth>=2 and 0<pct<100:
                 eff=base_price*((nth-1)+(1-pct/100))/nth
                 campaigns.append({'label':f'{nth}. üründe %{pct} indirim','qty':nth,'effective':eff,'priority':94})
-
     for m in re.finditer(r'(\d[\d.,]*)\s*(?:TL|₺).*?(\d[\d.,]*)\s*(?:TL|₺)\s*(?:tasarruf|indirim)',t,re.I):
         threshold,saving=price(m.group(1)),price(m.group(2))
         if threshold and saving and threshold>saving:
@@ -102,22 +99,33 @@ def inspect_page(url,expected=None):
             else:out['live']=min(live)
         if out['live']:
             candidates=[p for p in old if out['live']*1.03<p<=out['live']*1.8]
-            if candidates:out['old']=float(statistics.median(candidates))
+            if candidates:out['old']=min(candidates)
         camp=campaign_from_text(text,out['live'])
         out['campaign']=camp.get('best');out['campaigns']=camp.get('all') or []
         return out
     except Exception:return out
 
 def choose_reference(current,history=None,source=None,page=None,market_median=None,market_floor=None):
-    history=[float(x) for x in (history or []) if x and current*1.03<float(x)<=current*1.8]
-    hist=float(statistics.median(history)) if history else None
-    local=[x for x in (hist,source,page) if x and current*1.03<x<=current*1.8]
-    local_ref=float(statistics.median(local)) if local else None
+    raw_history=[float(x) for x in (history or []) if x and current*.70<=float(x)<=current*1.80]
+    stable=[x for x in raw_history if abs(x-current)/max(current,1)<=0.05]
+    # If we have several observations clustered around today's price, this is not a fresh deal.
+    # Do not let an inflated list/source price manufacture a large discount.
+    if len(stable)>=3 and len(stable)>=max(3,int(len(raw_history)*0.60)):
+        if not page or page<=current*1.10:
+            return None,'stable-price-history'
+
+    high_history=[x for x in raw_history if current*1.03<x<=current*1.8]
+    hist=min(high_history) if high_history else None
+    local=[float(x) for x in (hist,source,page) if x and current*1.03<float(x)<=current*1.8]
+    # Conservative rule: use the LOWEST credible reference, never the median/highest.
+    # Example: page says 15,299 while a source claims 21,999 -> 15,299 wins.
+    local_ref=min(local) if local else None
+
     if market_floor and current>market_floor*1.05:return None,'market-blocked'
     if local_ref:
-        if market_median and market_median>current*1.03:return min(local_ref,market_median),'market+history'
+        if market_median and market_median>current*1.03:return min(local_ref,float(market_median)),'market+history'
         if local_ref>current*1.45:return None,'unverified-high-reference'
-        return local_ref,'history/page'
+        return local_ref,'history/page-conservative'
     if market_floor and market_median and market_floor>current*1.10 and market_median<=market_floor*1.45:
         return float(market_floor),'market-floor'
     return None,'no-historical-reference'
