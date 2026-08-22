@@ -34,6 +34,30 @@ def local_meta(url):
     except:pass
     return 'Fırsat Ürünü',''
 
+def resolve_product_url(site,links,title):
+    # Önce doğrudan ürün linki.
+    for x in links:
+        try:
+            if ts.site(x)==site and ts.valid(site,x):
+                u=ts.normalize(site,x)
+                if u:return u
+        except Exception:pass
+    # Telegram kanallarında app.hb.biz / hps.im / amzn.to / ty.gl gibi kısa
+    # linkler sık kullanılıyor. Bunları hızlı HTTP redirect ile gerçek ürüne çöz.
+    for x in links:
+        try:
+            if ts.site(x)==site:
+                u=ts.http_resolve(x,site)
+                if u:return u
+        except Exception:pass
+    # Son çare: ürün başlığıyla mağaza içi HTTP araması. Browser açmadan hızlı kalır.
+    if title and title!='Fırsat Ürünü':
+        try:
+            u=ts.search_marketplace_http(site,title)
+            if u:return u
+        except Exception:pass
+    return None
+
 def send(site,url,title,current,ref,campaign,image,row):
     disc=(ref-current)/ref*100 if ref and ref>current else None
     lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else '🔥 FIRSAT','',f'🛍️ {html.escape(title)}',f'💰 Efektif birim fiyat: {fmt(current)} TL' if campaign else f'💰 {fmt(current)} TL']
@@ -56,7 +80,8 @@ def process(source,b):
     tx=b.select_one('.tgme_widget_message_text')
     if not tx:return False
     raw=tx.get_text(' ',strip=True);links=[ts.clean(a.get('href') or '') for a in b.select('a[href]')];title=clean_title(raw);cur,old=ts.source_pair(raw)
-    site=next((ts.site(x) for x in links if ts.site(x)),None);u=next((ts.normalize(site,x) for x in links if site and ts.valid(site,x)),None)
+    site=next((ts.site(x) for x in links if ts.site(x)),None)
+    u=resolve_product_url(site,links,title) if site else None
     if not site or not cur or not u:
         print(f'FAST ATLANDI | {source}:{post_id} | eksik_temel | site={site} fiyat={cur} link={bool(u)}');return False
     pg=inspect_page(u,cur) or {}
