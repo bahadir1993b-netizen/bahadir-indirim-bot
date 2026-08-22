@@ -1,6 +1,6 @@
 import os,re,html,json,requests
 from datetime import datetime,timezone,timedelta
-from urllib.parse import urljoin
+from urllib.parse import urljoin,urlsplit,urlunsplit,parse_qsl,urlencode
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import telegram_sources as ts
@@ -11,6 +11,7 @@ import archive_store as ar
 MIN_DISC=max(8.0,float(os.environ.get('WEB_FIRST_MIN_DISCOUNT','15')))
 MAX_CHECK=max(40,int(os.environ.get('WEB_FIRST_MAX_CHECK','220')))
 BROWSER_LIMIT=max(0,int(os.environ.get('WEB_FIRST_BROWSER_LIMIT','45')))
+AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 HEAD=dict(ts.HEAD)
 LANDINGS=[
  ('Amazon','https://www.amazon.com.tr/deals'),('Amazon','https://www.amazon.com.tr/gp/goldbox'),('Amazon','https://www.amazon.com.tr/s?k=indirim'),
@@ -27,12 +28,19 @@ def clean_title(s):
     s=re.sub(r'\s+',' ',s).strip(' -|:')
     return s[:170] if len(s)>=5 else 'Fırsat Ürünü'
 
+def affiliate_url(url,site):
+    if site!='Amazon':return url
+    try:
+        p=urlsplit(url);q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower()!='tag'];q.append(('tag',AMAZON_TAG))
+        return urlunsplit((p.scheme,p.netloc,p.path,urlencode(q,doseq=True),p.fragment))
+    except Exception:return url+('&' if '?' in url else '?')+'tag='+AMAZON_TAG
+
 def product_links(body,base,expected_site=None):
     soup=BeautifulSoup(body,'html.parser');out=[]
     for a in soup.select('a[href]'):
         u=urljoin(base,a.get('href') or '');s=ts.site(u) or expected_site
         if s and ts.valid(s,u):
-            n=ts.normalize(s,u)
+            n=ts.normalize(s,u) or u
             if n and n not in out:out.append(n)
     return out
 
@@ -45,8 +53,7 @@ def discover(page):
             if r.ok:links=product_links(r.text,r.url,site)
         except Exception:pass
         if len(links)<5:
-            try:
-                page.goto(url,wait_until='domcontentloaded',timeout=14000);page.wait_for_timeout(900);links=product_links(page.content(),page.url,site)
+            try:page.goto(url,wait_until='domcontentloaded',timeout=14000);page.wait_for_timeout(900);links=product_links(page.content(),page.url,site)
             except Exception:pass
         per_site[site]=per_site.get(site,0)+len(links)
         for u in links[:80]:
@@ -70,7 +77,8 @@ def duplicate_db(row,current):
     except:return False
 
 def send(row,url,site,title,current,ref,image,campaign=None):
-    out_url=ts.normalize(site,url) or url;disc=(ref-current)/ref*100
+    out_url=affiliate_url(ts.normalize(site,url) or url,site);disc=(ref-current)/ref*100
+    if site=='Amazon' and ('tag='+AMAZON_TAG) not in out_url:raise RuntimeError('Amazon affiliate tag missing at publish boundary')
     lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(clean_title(title))}']
     if campaign:
         lines += [f'💰 Efektif birim fiyat: {fmt(current)} TL',f'🎯 Kampanya: {html.escape(campaign.get("label") or "Kampanyalı alım")}']
@@ -88,7 +96,7 @@ def send(row,url,site,title,current,ref,image,campaign=None):
     if row and row.get('id'):ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat(),'last_posted_price':current})
     try:ts.sb('POST','price_history',json={'price':current,'product_url':canonical(url),'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
     except Exception:pass
-    print(f'WEB-FIRST GÖNDERİLDİ | {site} | {current:.2f}->{ref:.2f} | %{disc:.1f}')
+    print(f'WEB-FIRST GÖNDERİLDİ | {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | affiliate={"ok" if site!="Amazon" or "tag="+AMAZON_TAG in out_url else "HATA"}')
 
 def reference_for(url,title,live,old):
     hist=ls.history(url,days=180,limit=300);return ar.smart_reference(title,live,hist,old,None)
@@ -111,16 +119,15 @@ def main():
                     if (not info or not info.get('live') or not info.get('image')) and browser_used<BROWSER_LIMIT:
                         browser_used+=1;bi=v2.browser_check(page,url,None);info=bi or info
                     if not info or info.get('oos') or not info.get('live'):continue
-                    checked+=1;live=float(info['live']);campaign=info.get('campaign');current=live;ref=None;rsrc=''
-                    if campaign and campaign.get('effective') and float(campaign['effective'])<live*.99:current=float(campaign['effective']);ref=live;rsrc='page-campaign'
-                    else:ref,rsrc=reference_for(url,info.get('title') or '',live,info.get('old'))
+                    checked+=1;live=float(info['live']);campaign=info.get('campaign');current=live;ref=None
+                    if campaign and campaign.get('effective') and float(campaign['effective'])<live*.99:current=float(campaign['effective']);ref=live
+                    else:ref,_=reference_for(url,info.get('title') or '',live,info.get('old'))
                     title=clean_title(info.get('title') or 'Ürün');ls.upsert_product(url,site,title,live,info.get('old'),'web-first','',info.get('image') or '');ls.add_price(url,site,live,info.get('old'),'web-first','');ar.add(title,live,site,info.get('old'),'WebFirst','market-normal',url)
                     if not ref or ref<=current:continue
                     disc=(ref-current)/ref*100
                     if disc<MIN_DISC:continue
-                    if ls.recently_published(url,current,days=30,min_drop=.05):print(f'WEB-FIRST ATLANDI | duplicate-global-30d | {site} | {title[:55]}');continue
-                    row=recent_row(url)
-                    if not row:row=ts.save(site,canonical(url),title,live,info.get('old') or ref)
+                    if ls.recently_published(url,current,days=30,min_drop=.05):continue
+                    row=recent_row(url) or ts.save(site,canonical(url),title,live,info.get('old') or ref)
                     if duplicate_db(row,current):continue
                     send(row,url,site,title,current,float(ref),info.get('image'),campaign if current<live else None);sent+=1
                 except Exception as e:errors+=1;print(f'WEB-FIRST HATA | {type(e).__name__}: {e}')
