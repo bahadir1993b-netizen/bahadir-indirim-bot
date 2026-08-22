@@ -1,6 +1,6 @@
 import os,re,json,html,requests
 from datetime import datetime,timezone,timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode,urlsplit,urlunsplit,parse_qsl
 from playwright.sync_api import sync_playwright
 import local_store as ls
 import archive_store as ar
@@ -11,7 +11,7 @@ MIN_DISCOUNT=float(os.environ.get('MIN_DISCOUNT','15'))
 MAX_PRODUCTS=max(20,int(os.environ.get('DIRECT_MAX_PRODUCTS','120')))
 BROWSER_LIMIT=max(5,int(os.environ.get('DIRECT_BROWSER_LIMIT','24')))
 FRESH_HOURS=max(1,int(os.environ.get('DIRECT_FRESH_SOURCE_HOURS','4')))
-AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
+AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 DIRECT_ALERTS_ENABLED=str(os.environ.get('DIRECT_ALERTS_ENABLED','0')).strip().lower() in {'1','true','yes','on'}
 STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'errors':0,'history_writes':0,'archive_ref':0,'campaign_deals':0}
 
@@ -49,8 +49,12 @@ def merge_catalog():
 
 def outlink(url,site):
     u=canonical(url)
-    if site=='Amazon' and AMAZON_TAG:return u+'?'+urlencode({'tag':AMAZON_TAG})
-    return u
+    if site!='Amazon':return u
+    try:
+        p=urlsplit(u);q=dict(parse_qsl(p.query,keep_blank_values=True));q['tag']=AMAZON_TAG
+        return urlunsplit((p.scheme,p.netloc,p.path,urlencode(q),p.fragment))
+    except Exception:
+        return u+('&' if '?' in u else '?')+urlencode({'tag':AMAZON_TAG})
 
 def send(row,current,ref,title,image,site,refsrc,campaign=None):
     if not DIRECT_ALERTS_ENABLED:
@@ -96,13 +100,11 @@ def main():
                 if not info or not info.get('live'):
                     STATS['no_price']+=1;print(f'FİYAT YOK: {site} | {row.get("product_name","")[:80]}');continue
                 normal=float(info['live']);campaign=info.get('campaign');current=float(campaign['effective']) if campaign and campaign.get('effective') else normal
-a=''
                 title=(info.get('title') or row.get('product_name') or 'Ürün')[:300];hist=local_hist(url)
                 ref,refsrc=ar.smart_reference(title,current,hist,info.get('old'),num(row.get('previous_price')))
                 if campaign and normal>current*1.03:
                     if not ref or ref>normal:ref=normal
-                    refsrc='page-campaign'
-                    STATS['campaign_deals']+=1
+                    refsrc='page-campaign';STATS['campaign_deals']+=1
                 if refsrc.startswith('weighted') or refsrc=='deal-history-not-low':STATS['archive_ref']+=1
                 ls.upsert_product(url,site=site,title=title,price=normal,old_price=info.get('old') or num(row.get('previous_price')),source=info.get('source') or 'direct',post_id='',image=info.get('image') or '')
                 ls.add_price(url,site,normal,info.get('old'),'direct-check','');ar.add(title,normal,site,info.get('old'),'DirectCheck','direct-current',url);STATS['history_writes']+=1
