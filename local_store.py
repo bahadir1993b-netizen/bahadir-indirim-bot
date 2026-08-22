@@ -1,5 +1,5 @@
-import os, sqlite3, threading
-from datetime import datetime, timezone
+import os, sqlite3, threading, re
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, urlunparse
 
 DB_PATH=os.environ.get('LOCAL_PRICE_DB','/app/data/price_memory.db')
@@ -11,6 +11,10 @@ def canonical(url):
     try:
         p=urlparse(url or '')
         if not p.netloc:return url or ''
+        host=p.netloc.lower().replace('www.','')
+        if host.endswith('amazon.com.tr'):
+            m=re.search(r'/(?:dp|gp/product)/([A-Z0-9]{8,12})(?:[/?]|$)',p.path,re.I)
+            if m:return f'https://www.amazon.com.tr/dp/{m.group(1).upper()}'
         return urlunparse(('https',p.netloc.lower(),p.path.rstrip('/'),'','',''))
     except:return url or ''
 
@@ -58,8 +62,37 @@ def conn():
       before_id INTEGER,
       updated_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS publish_log(
+      url TEXT PRIMARY KEY,
+      price REAL NOT NULL,
+      published_at TEXT NOT NULL,
+      source TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_publish_time ON publish_log(published_at DESC);
     ''')
     return c
+
+def recently_published(url,price,days=30,min_drop=0.05):
+    url=canonical(url)
+    if not url or not price:return False
+    with _lock:
+        c=conn();r=c.execute('SELECT price,published_at FROM publish_log WHERE url=?',(url,)).fetchone();c.close()
+    if not r:return False
+    try:
+        dt=datetime.fromisoformat(str(r['published_at']).replace('Z','+00:00'))
+        if datetime.now(timezone.utc)-dt>timedelta(days=int(days)):return False
+        old=float(r['price'])
+        # Aynı/yüksek fiyatı tekrar yayınlama; ancak en az %5 daha ucuzsa yeniden yayınla.
+        return float(price)>=old*(1-float(min_drop))
+    except:return False
+
+def mark_published(url,price,source=''):
+    url=canonical(url)
+    if not url or not price:return
+    with _lock:
+        c=conn();c.execute('''INSERT INTO publish_log(url,price,published_at,source) VALUES(?,?,?,?)
+          ON CONFLICT(url) DO UPDATE SET price=excluded.price,published_at=excluded.published_at,source=excluded.source''',
+          (url,float(price),_now(),str(source or '')));c.commit();c.close()
 
 def upsert_product(url,site='',title='',price=None,old_price=None,source='',post_id='',image=''):
     url=canonical(url)
@@ -92,7 +125,6 @@ def add_price(url,site,price,old_price=None,source='',post_id='',recorded_at=Non
         should=True
         if row and abs(float(row['price'])-float(price))/max(float(price),1)<0.002:
             try:
-                from datetime import datetime, timezone
                 dt=datetime.fromisoformat(str(row['recorded_at']).replace('Z','+00:00'))
                 should=(datetime.now(timezone.utc)-dt).total_seconds()>=1800
             except:pass
