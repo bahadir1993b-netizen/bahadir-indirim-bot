@@ -3,8 +3,7 @@ services:
     build: .
     container_name: bahadir-direct-bot
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       DIRECT_ALERTS_ENABLED: ${DIRECT_ALERTS_ENABLED:-1}
@@ -15,72 +14,54 @@ services:
       LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_direct_reported.py; code=$$?; echo "API-siz fiyat takip turu bitti (kod=$$code). ${SCAN_INTERVAL:-600} sn sonra tekrar."; sleep ${SCAN_INTERVAL:-600}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_direct_reported.py; sleep ${SCAN_INTERVAL:-600}; done'
   telegram-bot:
     build: .
     container_name: bahadir-telegram-bot
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
-      TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-60}
-      TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-180}
+      TELEGRAM_INTERVAL: ${TELEGRAM_INTERVAL:-30}
+      TELEGRAM_MAX_AGE: ${TELEGRAM_MAX_AGE:-60}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_DISABLED: "1"
       SERPER_API_KEY: ""
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_telegram_realtime.py; sleep ${TELEGRAM_INTERVAL:-30}; done'
   trusted-fast-lane:
     build: .
     container_name: bahadir-trusted-fast-lane
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
-      FAST_LANE_INTERVAL: ${FAST_LANE_INTERVAL:-30}
-      FAST_LANE_MAX_AGE: ${FAST_LANE_MAX_AGE:-60}
+      FAST_LANE_INTERVAL: ${FAST_LANE_INTERVAL:-10}
+      FAST_LANE_MAX_AGE: ${FAST_LANE_MAX_AGE:-20}
       FAST_LANE_MIN_DISCOUNT: ${FAST_LANE_MIN_DISCOUNT:-5}
       LOCAL_PRICE_DB: /app/data/price_memory.db
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_trusted_fast_lane.py; code=$$?; echo "Öncelikli Telegram hızlı tur bitti (kod=$$code). ${FAST_LANE_INTERVAL:-30} sn sonra tekrar."; sleep ${FAST_LANE_INTERVAL:-30}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_trusted_fast_lane.py; sleep ${FAST_LANE_INTERVAL:-10}; done'
   web-first-deals:
     build: .
     container_name: bahadir-web-first-deals
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       WEB_FIRST_INTERVAL: ${WEB_FIRST_INTERVAL:-120}
       WEB_FIRST_MIN_DISCOUNT: ${WEB_FIRST_MIN_DISCOUNT:-15}
       WEB_FIRST_MAX_CHECK: ${WEB_FIRST_MAX_CHECK:-180}
       WEB_FIRST_BROWSER_LIMIT: ${WEB_FIRST_BROWSER_LIMIT:-35}
       LOCAL_PRICE_DB: /app/data/price_memory.db
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_web_first_deals.py; code=$$?; echo "Web-first fırsat turu bitti (kod=$$code). ${WEB_FIRST_INTERVAL:-120} sn sonra tekrar."; sleep ${WEB_FIRST_INTERVAL:-120}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_web_first_deals.py; sleep ${WEB_FIRST_INTERVAL:-120}; done'
   price-sampler:
     build: .
     container_name: bahadir-price-sampler
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       PRICE_SAMPLE_INTERVAL: ${PRICE_SAMPLE_INTERVAL:-180}
       PRICE_SAMPLE_LIMIT: ${PRICE_SAMPLE_LIMIT:-600}
@@ -89,124 +70,85 @@ services:
       PRICE_SAMPLE_SLEEP: ${PRICE_SAMPLE_SLEEP:-0.08}
       PRICE_SAMPLE_DEAL_PCT: ${PRICE_SAMPLE_DEAL_PCT:-15}
       SERPER_DISABLED: "1"
-      SERPER_API_KEY: ""
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_price_sampler.py; code=$$?; echo "Sürekli fiyat örnekleme bitti (kod=$$code). ${PRICE_SAMPLE_INTERVAL:-180} sn sonra tekrar."; sleep ${PRICE_SAMPLE_INTERVAL:-180}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_price_sampler.py; sleep ${PRICE_SAMPLE_INTERVAL:-180}; done'
   price-analyst:
     build: .
     container_name: bahadir-price-analyst
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       ANALYST_INTERVAL: ${ANALYST_INTERVAL:-300}
       ANALYST_MAX_ALERTS: ${ANALYST_MAX_ALERTS:-4}
       MIN_DISCOUNT: ${MIN_DISCOUNT:-15}
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_price_analyst.py; code=$$?; echo "Fiyat analisti bitti (kod=$$code). ${ANALYST_INTERVAL:-300} sn sonra tekrar."; sleep ${ANALYST_INTERVAL:-300}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_price_analyst.py; sleep ${ANALYST_INTERVAL:-300}; done'
   history-harvester:
     build: .
     container_name: bahadir-history-harvester
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       HARVEST_INTERVAL: ${HARVEST_INTERVAL:-600}
       HARVEST_PAGES_PER_RUN: ${HARVEST_PAGES_PER_RUN:-40}
       HARVEST_MAX_BLOCKS: ${HARVEST_MAX_BLOCKS:-2200}
       SERPER_DISABLED: "1"
-      SERPER_API_KEY: ""
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_history_harvester.py; code=$$?; echo "Telegram geçmiş hasadı bitti (kod=$$code). ${HARVEST_INTERVAL:-600} sn sonra tekrar."; sleep ${HARVEST_INTERVAL:-600}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_history_harvester.py; sleep ${HARVEST_INTERVAL:-600}; done'
   onual-harvester:
     build: .
     container_name: bahadir-onual-harvester
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       ONUAL_INTERVAL: ${ONUAL_INTERVAL:-600}
       ONUAL_PAGES_PER_RUN: ${ONUAL_PAGES_PER_RUN:-60}
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_onual_harvester.py; code=$$?; echo "OnuAl arşiv hasadı bitti (kod=$$code). ${ONUAL_INTERVAL:-600} sn sonra tekrar."; sleep ${ONUAL_INTERVAL:-600}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_onual_harvester.py; sleep ${ONUAL_INTERVAL:-600}; done'
   akakce-enricher:
     build: .
     container_name: bahadir-akakce-enricher
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       AKAKCE_INTERVAL: ${AKAKCE_INTERVAL:-600}
       AKAKCE_LIMIT: ${AKAKCE_LIMIT:-120}
       AKAKCE_SLEEP: ${AKAKCE_SLEEP:-0.8}
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_akakce_enricher.py; code=$$?; echo "Akakçe zenginleştirme bitti (kod=$$code). ${AKAKCE_INTERVAL:-600} sn sonra tekrar."; sleep ${AKAKCE_INTERVAL:-600}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_akakce_enricher.py; sleep ${AKAKCE_INTERVAL:-600}; done'
   google-shopping-harvester:
     build: .
     container_name: bahadir-google-shopping-harvester
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       GOOGLE_SHOPPING_INTERVAL: ${GOOGLE_SHOPPING_INTERVAL:-1800}
       GOOGLE_SHOPPING_LIMIT: ${GOOGLE_SHOPPING_LIMIT:-30}
       GOOGLE_SHOPPING_SLEEP: ${GOOGLE_SHOPPING_SLEEP:-2.2}
       SERPER_DISABLED: "1"
-      SERPER_API_KEY: ""
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_google_shopping_harvester.py; code=$$?; echo "Google Shopping hasadı bitti (kod=$$code). ${GOOGLE_SHOPPING_INTERVAL:-1800} sn sonra tekrar."; sleep ${GOOGLE_SHOPPING_INTERVAL:-1800}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_google_shopping_harvester.py; sleep ${GOOGLE_SHOPPING_INTERVAL:-1800}; done'
   serper-seed:
     build: .
     container_name: bahadir-serper-seed
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      AMAZON_ASSOCIATE_TAG: ${AMAZON_ASSOCIATE_TAG:-ozelfirsat09-21}
       LOCAL_PRICE_DB: /app/data/price_memory.db
       SERPER_SEED_INTERVAL: ${SERPER_SEED_INTERVAL:-21600}
       SERPER_SEED_QUERIES: ${SERPER_SEED_QUERIES:-12}
-    volumes:
-      - ./data:/app/data
-    command: >-
-      sh -c 'while true; do python run_serper_seed.py; code=$$?; echo "Serper seed turu bitti (kod=$$code). ${SERPER_SEED_INTERVAL:-21600} sn sonra tekrar."; sleep ${SERPER_SEED_INTERVAL:-21600}; done'
-
+    volumes: ["./data:/app/data"]
+    command: sh -c 'while true; do python run_serper_seed.py; sleep ${SERPER_SEED_INTERVAL:-21600}; done'
   health:
     build: .
     container_name: bahadir-health
     restart: unless-stopped
-    environment:
-      HEALTH_PORT: 8787
-    volumes:
-      - ./data:/app/data:ro
-    ports:
-      - "8787:8787"
+    environment: {HEALTH_PORT: 8787}
+    volumes: ["./data:/app/data:ro"]
+    ports: ["8787:8787"]
     command: python health_server.py
