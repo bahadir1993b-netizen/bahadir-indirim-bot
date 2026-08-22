@@ -13,12 +13,15 @@ BROWSER_LIMIT=max(5,int(os.environ.get('DIRECT_BROWSER_LIMIT','24')))
 FRESH_HOURS=max(1,int(os.environ.get('DIRECT_FRESH_SOURCE_HOURS','4')))
 AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 DIRECT_ALERTS_ENABLED=str(os.environ.get('DIRECT_ALERTS_ENABLED','0')).strip().lower() in {'1','true','yes','on'}
-STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'errors':0,'history_writes':0,'archive_ref':0,'campaign_deals':0}
+STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'duplicates':0,'errors':0,'history_writes':0,'archive_ref':0,'campaign_deals':0}
 
 def num(x):return v2.num(x)
 def fmt(x):return v2.fmt(x)
 def canonical(u):return ls.canonical(u)
 def site_of(u,s=''):return v2.site_of(u,s)
+def clean_title(t):
+    t=re.sub(r'\s*[:|\-]?\s*Amazon\.com\.tr\s*:\s*.*$',' ',t or '',flags=re.I)
+    return re.sub(r'\s+',' ',t).strip(' -|:')[:220] or 'Ürün'
 def parse_dt(s):
     try:return datetime.fromisoformat(str(s).replace('Z','+00:00'))
     except:return None
@@ -42,7 +45,8 @@ def merge_catalog():
             u=canonical(r.get('product_url') or '');s=site_of(u,r.get('site') or '')
             if not u or s not in {'Amazon','Hepsiburada','Trendyol','N11'}:continue
             if u in merged:merged[u].update({k:v for k,v in r.items() if v not in (None,'')})
-            else:merged[u]=r
+            else:
+                r=dict(r);r['product_url']=u;merged[u]=r
     except Exception as e:print(f'SUPABASE KATALOG UYARI: {type(e).__name__}: {e}')
     rows=list(merged.values());rows.sort(key=lambda x:x.get('updated_at') or x.get('local_last_seen') or '')
     return rows[:MAX_PRODUCTS]
@@ -60,7 +64,10 @@ def send(row,current,ref,title,image,site,refsrc,campaign=None):
     if not DIRECT_ALERTS_ENABLED:
         print(f'YAYIN KAPALI (direct) | {site} | {current:.2f}->{ref:.2f} | kampanya={campaign.get("label") if campaign else "yok"} | {title[:70]}')
         return False
-    disc=(ref-current)/ref*100;url=outlink(row['product_url'],site)
+    url=outlink(row['product_url'],site)
+    if ls.recently_published(url,current,days=30,min_drop=.05):
+        STATS['duplicates']+=1;print(f'TEKRAR ENGELLENDİ: {site} | {current:.2f} | {title[:70]}');return False
+    disc=(ref-current)/ref*100
     lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}',f'💰 Efektif birim fiyat: {fmt(current)} TL' if campaign else f'💰 {fmt(current)} TL']
     if campaign:
         lines.append(f'🎯 Kampanya: {html.escape(campaign.get("label") or "Kampanyalı alım")}')
@@ -72,11 +79,12 @@ def send(row,current,ref,title,image,site,refsrc,campaign=None):
     if image:
         try:
             img=requests.get(image,headers=v2.HEAD,timeout=12,allow_redirects=True)
-            if img.ok and img.content:
+            if img.ok and len(img.content)>4000:
                 resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHANNEL_ID,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(kb,ensure_ascii=False)},files={'photo':('product.jpg',img.content,img.headers.get('content-type','image/jpeg'))},timeout=22)
         except:resp=None
     if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'link_preview_options':{'is_disabled':True},'reply_markup':kb},timeout=18)
     if not resp.ok:raise RuntimeError(f'Telegram {resp.status_code}: {resp.text[:160]}')
+    ls.mark_published(url,current,'direct')
     STATS['sent']+=1;print(f'GÖNDERİLDİ: {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | ref={refsrc} | kampanya={campaign.get("label") if campaign else "yok"} | {title[:70]}')
     return True
 
@@ -100,7 +108,7 @@ def main():
                 if not info or not info.get('live'):
                     STATS['no_price']+=1;print(f'FİYAT YOK: {site} | {row.get("product_name","")[:80]}');continue
                 normal=float(info['live']);campaign=info.get('campaign');current=float(campaign['effective']) if campaign and campaign.get('effective') else normal
-                title=(info.get('title') or row.get('product_name') or 'Ürün')[:300];hist=local_hist(url)
+                title=clean_title(info.get('title') or row.get('product_name') or 'Ürün');hist=local_hist(url)
                 ref,refsrc=ar.smart_reference(title,current,hist,info.get('old'),num(row.get('previous_price')))
                 if campaign and normal>current*1.03:
                     if not ref or ref>normal:ref=normal
