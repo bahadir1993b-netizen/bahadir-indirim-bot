@@ -87,8 +87,6 @@ try:
         p=urlparse(url or '');host=p.netloc.lower().replace('www.','');return host.endswith('n11.com') and bool(re.search(r'/urun/[^/?#]+',p.path,re.I))
     ts.valid=valid_ext
 
-    # All marketplace title-search fallbacks require >=50% token overlap.
-    # This prevents a missing short-link resolution from silently pointing at a similar but wrong product.
     SEARCH_BASE={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q=','N11':'https://www.n11.com/arama?q='}
     def _strict_http(site,title):
         base=SEARCH_BASE.get(site)
@@ -122,5 +120,55 @@ try:
         except Exception as e:print(f'{site} BROWSER SEARCH UYARI | {type(e).__name__}')
         return None
     ts.search_marketplace_browser=_strict_browser
+
+    _base_http_resolve=ts.http_resolve
+    def _extract_market_url_from_html(base_url,html,site):
+        if not html:return None
+        from bs4 import BeautifulSoup
+        soup=BeautifulSoup(html,'html.parser')
+        candidates=[]
+        for sel,attr in [('link[rel="canonical"]','href'),('meta[property="og:url"]','content'),('meta[name="twitter:url"]','content')]:
+            e=soup.select_one(sel)
+            if e:candidates.append(urljoin(base_url,e.get(attr) or ''))
+        for e in soup.select('meta[http-equiv="refresh"]'):
+            m=re.search(r'url\s*=\s*([^;]+)$',e.get('content') or '',re.I)
+            if m:candidates.append(urljoin(base_url,m.group(1).strip(' \"\'')))
+        for a in soup.select('a[href]'):
+            candidates.append(urljoin(base_url,a.get('href') or ''))
+        for m in re.finditer(r'https?://[^\s"\'<>]+',html):
+            candidates.append(m.group(0).replace('\\/','/'))
+        for u in candidates:
+            try:
+                if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
+            except Exception:continue
+        return None
+
+    def _short_browser_resolve(page,url,site):
+        if not url:return None
+        try:
+            page.goto(url,wait_until='domcontentloaded',timeout=12000)
+            final=ts.clean(page.url)
+            if ts.site(final)==site and ts.valid(site,final):
+                print(f'SHORT LINK BROWSER OK | {site} | {urlparse(url).netloc}')
+                return ts.normalize(site,final)
+            html=page.content()
+            found=_extract_market_url_from_html(final or url,html,site)
+            if found:
+                print(f'SHORT LINK HTML OK | {site} | {urlparse(url).netloc}')
+                return found
+        except Exception as e:print(f'SHORT LINK BROWSER UYARI | {site} | {type(e).__name__}')
+        return None
+
+    def _resolve_ext(page,url,site,title):
+        u=_base_http_resolve(url,site)
+        if u:return u
+        host=urlparse(url or '').netloc.lower().replace('www.','')
+        if host in ts.SHORT or any(host.endswith('.'+x) for x in ts.SHORT):
+            u=_short_browser_resolve(page,url,site)
+            if u:return u
+        u=_strict_http(site,title)
+        if u:return u
+        return _strict_browser(page,site,title)
+    ts.resolve=_resolve_ext
 except Exception as exc:
     print(f'Marketplace extension warning: {type(exc).__name__}: {exc}')
