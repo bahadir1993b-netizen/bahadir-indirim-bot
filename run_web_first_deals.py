@@ -19,6 +19,7 @@ LANDINGS=[
  ('Trendyol','https://www.trendyol.com/sr?fl=encokavantajliurunler'),('Trendyol','https://www.trendyol.com/sr?q=indirim'),('Trendyol','https://www.trendyol.com/sr?q=firsat'),
  ('N11','https://www.n11.com/kampanyalar'),('N11','https://www.n11.com/arama?q=indirim'),
 ]
+BAD_TITLES={'ürün','fırsat ürünü','sepete ekleniyor','sepete ekle','hemen al','amazon'}
 
 def canonical(u):return ls.canonical(u)
 def fmt(x):return v2.fmt(x)
@@ -26,7 +27,8 @@ def clean_title(s):
     s=re.sub(r'\s*[:|\-]?\s*Amazon\.com\.tr\s*:\s*.*$',' ',str(s or ''),flags=re.I)
     s=re.sub(r'(?i)^\s*(?:sepete ekleniyor|sepete ekle|hemen al)\s*[.!…-]*\s*',' ',s)
     s=re.sub(r'\s+',' ',s).strip(' -|:')
-    return s[:170] if len(s)>=5 else 'Fırsat Ürünü'
+    return s[:170] if len(s)>=5 and s.lower() not in BAD_TITLES else 'Fırsat Ürünü'
+def good_title(s):return clean_title(s)!='Fırsat Ürünü'
 
 def affiliate_url(url,site):
     if site!='Amazon':return url
@@ -34,6 +36,65 @@ def affiliate_url(url,site):
         p=urlsplit(url);q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower()!='tag'];q.append(('tag',AMAZON_TAG))
         return urlunsplit((p.scheme,p.netloc,p.path,urlencode(q,doseq=True),p.fragment))
     except Exception:return url+('&' if '?' in url else '?')+'tag='+AMAZON_TAG
+
+def _jsonld_meta(soup):
+    for el in soup.select('script[type="application/ld+json"]'):
+        try:data=json.loads(el.string or el.get_text() or '{}')
+        except:continue
+        objs=data if isinstance(data,list) else [data]
+        for obj in objs:
+            if not isinstance(obj,dict):continue
+            if isinstance(obj.get('@graph'),list):objs.extend(x for x in obj['@graph'] if isinstance(x,dict))
+            title=obj.get('name') if isinstance(obj.get('name'),str) else ''
+            image=obj.get('image');image=image[0] if isinstance(image,list) and image else image
+            if title or (isinstance(image,str) and image.startswith('http')):return title,image
+    return '',None
+
+def sale_meta(url,site,hint=''):
+    urls=[url]
+    if site=='Amazon':
+        m=re.search(r'/(?:dp|gp/product)/([A-Z0-9]{8,12})',url,re.I)
+        if m:
+            asin=m.group(1).upper();urls += [f'https://www.amazon.com.tr/dp/{asin}?th=1&psc=1',f'https://www.amazon.com.tr/gp/aw/d/{asin}']
+    best_title=clean_title(hint);best_image=None
+    for u in urls:
+        try:r=requests.get(u,headers=HEAD,timeout=7,allow_redirects=True)
+        except:continue
+        if not r.ok:continue
+        soup=BeautifulSoup(r.text,'html.parser');title='';image=None
+        for sel,attr in [('#productTitle',None),('h1',None),('meta[property="og:title"]','content'),('meta[name="twitter:title"]','content')]:
+            e=soup.select_one(sel)
+            if e:
+                title=(e.get(attr) if attr else e.get_text(' ',strip=True)) or ''
+                title=clean_title(title)
+                if title!='Fırsat Ürünü':break
+        for sel,attr in [('#landingImage','data-old-hires'),('#landingImage','src'),('img#imgBlkFront','src'),('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('[itemprop="image"]','content'),('[itemprop="image"]','src')]:
+            e=soup.select_one(sel)
+            if e:
+                v=e.get(attr) or ''
+                if isinstance(v,str) and v.startswith('http'):image=v;break
+        if not title or not image:
+            jt,ji=_jsonld_meta(soup)
+            if title in ('','Fırsat Ürünü') and jt:title=clean_title(jt)
+            if not image and isinstance(ji,str) and ji.startswith('http'):image=ji
+        if title!='Fırsat Ürünü':best_title=title
+        if image:best_image=image
+        if best_title!='Fırsat Ürünü' and best_image:break
+    # Son çare: ürün adı biliniyorsa mağaza aramasından uygun ürün görselini al.
+    if not best_image and best_title!='Fırsat Ürünü':
+        base={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q='}.get(site)
+        if base:
+            try:
+                r=requests.get(base+requests.utils.quote(best_title[:120]),headers=HEAD,timeout=6)
+                soup=BeautifulSoup(r.text,'html.parser');want=ts.tokens(best_title);best=(0,None)
+                for card in soup.select('div[data-asin],li,div[class*="product"],div[class*="p-card"]')[:80]:
+                    txt=card.get_text(' ',strip=True);got=ts.tokens(txt);score=len(want&got)/max(1,len(want))
+                    img=card.select_one('img[src]')
+                    src=img.get('src') if img else None
+                    if src and src.startswith('http') and score>best[0]:best=(score,src)
+                if best[0]>=.25:best_image=best[1]
+            except:pass
+    return best_title,best_image
 
 def product_links(body,base,expected_site=None):
     soup=BeautifulSoup(body,'html.parser');out=[]
@@ -77,9 +138,13 @@ def duplicate_db(row,current):
     except:return False
 
 def send(row,url,site,title,current,ref,image,campaign=None):
+    # Yayından hemen önce gerçek satış sayfasından başlık/görseli bir kez daha kurtar.
+    title,image2=sale_meta(url,site,title);image=image or image2
+    if title=='Fırsat Ürünü':
+        print(f'WEB-FIRST YAYIN ENGELLENDİ | ürün_adı_yok | {site} | {url}');return False
     out_url=affiliate_url(ts.normalize(site,url) or url,site);disc=(ref-current)/ref*100
     if site=='Amazon' and ('tag='+AMAZON_TAG) not in out_url:raise RuntimeError('Amazon affiliate tag missing at publish boundary')
-    lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(clean_title(title))}']
+    lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}']
     if campaign:
         lines += [f'💰 Efektif birim fiyat: {fmt(current)} TL',f'🎯 Kampanya: {html.escape(campaign.get("label") or "Kampanyalı alım")}']
         if campaign.get('qty'):lines.append(f'📦 {campaign["qty"]} adet alımda geçerli')
@@ -96,7 +161,7 @@ def send(row,url,site,title,current,ref,image,campaign=None):
     if row and row.get('id'):ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat(),'last_posted_price':current})
     try:ts.sb('POST','price_history',json={'price':current,'product_url':canonical(url),'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
     except Exception:pass
-    print(f'WEB-FIRST GÖNDERİLDİ | {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | affiliate={"ok" if site!="Amazon" or "tag="+AMAZON_TAG in out_url else "HATA"}')
+    print(f'WEB-FIRST GÖNDERİLDİ | {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | foto={"var" if image else "yok"} | affiliate={"ok" if site!="Amazon" or "tag="+AMAZON_TAG in out_url else "HATA"}');return True
 
 def reference_for(url,title,live,old):
     hist=ls.history(url,days=180,limit=300);return ar.smart_reference(title,live,hist,old,None)
@@ -116,20 +181,23 @@ def main():
                 if site not in {'Amazon','Hepsiburada','Trendyol','N11'}:continue
                 try:
                     info=v2.http_check(url,None)
-                    if (not info or not info.get('live') or not info.get('image')) and browser_used<BROWSER_LIMIT:
+                    if (not info or not info.get('live') or not info.get('image') or not good_title(info.get('title'))) and browser_used<BROWSER_LIMIT:
                         browser_used+=1;bi=v2.browser_check(page,url,None);info=bi or info
                     if not info or info.get('oos') or not info.get('live'):continue
                     checked+=1;live=float(info['live']);campaign=info.get('campaign');current=live;ref=None
                     if campaign and campaign.get('effective') and float(campaign['effective'])<live*.99:current=float(campaign['effective']);ref=live
                     else:ref,_=reference_for(url,info.get('title') or '',live,info.get('old'))
-                    title=clean_title(info.get('title') or 'Ürün');ls.upsert_product(url,site,title,live,info.get('old'),'web-first','',info.get('image') or '');ls.add_price(url,site,live,info.get('old'),'web-first','');ar.add(title,live,site,info.get('old'),'WebFirst','market-normal',url)
+                    title,image=sale_meta(url,site,info.get('title') or '')
+                    if title=='Fırsat Ürünü':print(f'WEB-FIRST ATLANDI | ürün_adı_yok | {site} | {url}');continue
+                    image=info.get('image') or image
+                    ls.upsert_product(url,site,title,live,info.get('old'),'web-first','',image or '');ls.add_price(url,site,live,info.get('old'),'web-first','');ar.add(title,live,site,info.get('old'),'WebFirst','market-normal',url)
                     if not ref or ref<=current:continue
                     disc=(ref-current)/ref*100
                     if disc<MIN_DISC:continue
                     if ls.recently_published(url,current,days=30,min_drop=.05):continue
                     row=recent_row(url) or ts.save(site,canonical(url),title,live,info.get('old') or ref)
                     if duplicate_db(row,current):continue
-                    send(row,url,site,title,current,float(ref),info.get('image'),campaign if current<live else None);sent+=1
+                    if send(row,url,site,title,current,float(ref),image,campaign if current<live else None):sent+=1
                 except Exception as e:errors+=1;print(f'WEB-FIRST HATA | {type(e).__name__}: {e}')
             browser.close()
         ls.runtime_finish('web-first','ok' if errors==0 else 'warning',candidates=len(discovered),checked=checked,sent=sent,errors=errors,details={'browser':browser_used})
