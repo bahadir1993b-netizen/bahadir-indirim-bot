@@ -100,7 +100,7 @@ def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None,campaign=None,page_im
     if photo:
         rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendPhoto',data={'chat_id':ts.CHAT,'photo':photo,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(keyboard,ensure_ascii=False)},timeout=18)
     if not rr or not rr.ok:
-        rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendMessage',json={'chat_id':ts.CHAT,'text':text,'parse_mode':'HTML','disable_web_page_preview':False,'reply_markup':keyboard},timeout=18)
+        rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendMessage',json={'chat_id':ts.CHAT,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'reply_markup':keyboard},timeout=18)
     rr.raise_for_status()
     if isinstance(row,dict) and row.get('id'):ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
     ts.remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL | ref={p or 0:.2f} | kaynak={ref_source} | kampanya={campaign.get("label") if campaign else "yok"} | foto={"var" if photo else "yok"}');return True
@@ -116,7 +116,6 @@ def strict_send(s,u,t,c,p,source,post_id,signal,coupon=None):
         print(f'ATLANDI | {source}:{post_id} | stokta yok');ts.remember(key);return False
     if pg.get('title') and len(pg['title'])>len(t)*0.8:t=clean_title(pg['title'])
     campaign=pg.get('campaign');live=pg.get('live')
-    # Cheap direct HTML fallback; no search API is used.
     if not live:
         try:
             pc,po=ts.marketplace_price_check(s,u,c)
