@@ -11,6 +11,7 @@ MIN_DISC=max(3.0,float(os.environ.get('FAST_LANE_MIN_DISCOUNT','5')))
 HEAD=dict(ts.HEAD);HEAD.update({'Cache-Control':'no-cache, no-store, max-age=0','Pragma':'no-cache'})
 
 def fmt(x):return f'{x:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
+def fast_key(source,post_id):return f'fast:{source}:{post_id}'
 def clean_title(raw):
     s=re.sub(r'@[A-Za-z0-9_]+|#(?:tanıtım|tanitim|reklam)',' ',raw or '',flags=re.I)
     s=re.sub(r'(?i)\b(?:sohbet grubumuz|kanalımıza katıl|takip et|reklam)\b.*$',' ',s)
@@ -75,13 +76,20 @@ def send(site,url,title,current,ref,campaign,image,row):
 
 def process(source,b,page):
     post_id=b.get('data-post','').split('/')[-1]
-    if not post_id or ts.seen(f'{source}:{post_id}'):return False
+    key=fast_key(source,post_id) if post_id else ''
+    # IMPORTANT: fast lane has its own seen namespace. The regular Telegram
+    # scanner may mark a source post as seen even when it rejects the deal;
+    # sharing the old key made the fast lane silently skip exactly the deals
+    # it was added to rescue.
+    if not post_id or ts.seen(key):return False
     tx=b.select_one('.tgme_widget_message_text')
     if not tx:return False
     raw=tx.get_text(' ',strip=True);links=[ts.clean(a.get('href') or '') for a in b.select('a[href]')]
     site=next((ts.site(x) for x in links if ts.site(x)),None) or next((x for x in set(ts.MARKET.values()) if re.search(r'\b'+re.escape(x)+r'\b',raw,re.I)),None)
     cur,old=ts.source_pair(raw)
-    if not site or not cur:return False
+    if not site or not cur:
+        print(f'FAST ATLANDI | {source}:{post_id} | site/fiyat_yok | site={site} fiyat={cur}')
+        return False
     title=clean_title(raw)
     u=next((ts.normalize(site,x) for x in links if ts.valid(site,x)),None)
     if not u:u=ts.resolve(page,links[0] if links else '',site,title)
@@ -89,7 +97,7 @@ def process(source,b,page):
         print(f'FAST ATLANDI | {source}:{post_id} | link_yok');return False
     pg=inspect_page(u,cur)
     if pg.get('available') is False:
-        ts.remember(f'{source}:{post_id}');return False
+        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | stok_yok');return False
     if pg.get('title'):title=clean_title(pg['title'])
     live=pg.get('live');campaign=pg.get('campaign');effective=None;label=None
     if campaign and campaign.get('effective') and live:
@@ -97,8 +105,7 @@ def process(source,b,page):
     q=qty_hint(raw)
     if not effective and live and q and explicit_unit(raw) and cur<live*.97 and cur>=live/max(q,2)*.80:
         effective=float(cur);label=f'{q} adet alımda geçerli'
-    if not effective:
-        effective=float(cur)
+    if not effective:effective=float(cur)
     refs=[x for x in [live,pg.get('old'),old] if x and float(x)>effective*1.03 and float(x)<=effective*2.2]
     ref=min(map(float,refs)) if refs else None
     if not ref and live and effective<live*.95:ref=float(live)
@@ -106,13 +113,13 @@ def process(source,b,page):
         print(f'FAST ATLANDI | {source}:{post_id} | referans_yok | kaynak={cur:.2f} canlı={live or 0:.2f}');return False
     disc=(ref-effective)/ref*100
     if disc<MIN_DISC:
-        ts.remember(f'{source}:{post_id}');print(f'FAST ATLANDI | {source}:{post_id} | %{disc:.1f}');return False
+        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | %{disc:.1f}');return False
     row=ts.save(site,u,title,effective,ref)
     if recently_posted(row,effective):
-        ts.remember(f'{source}:{post_id}');print(f'FAST ATLANDI | {source}:{post_id} | duplicate-30d');return False
+        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | duplicate-30d');return False
     photo=source_photo(b) or pg.get('image')
     ok=send(site,u,title,effective,ref,label,photo,row)
-    ts.remember(f'{source}:{post_id}')
+    ts.remember(key)
     return ok
 
 def main():
