@@ -1,12 +1,12 @@
-"""Runtime marketplace and safety extensions shared by every Python service."""
+"""Runtime marketplace and publishing safety extensions shared by every Python service."""
 try:
-    import os,re,requests
+    import os,re,json,requests
     from datetime import datetime,timezone,timedelta
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse,urlsplit,urlunsplit,parse_qsl,urlencode
     import telegram_sources as ts
     import local_store as ls
 
-    ts.AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
+    ts.AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 
     _base_normalize=ts.normalize
     def normalize_ext(site,url):
@@ -17,6 +17,47 @@ try:
             except Exception:pass
         return _base_normalize(site,url)
     ts.normalize=normalize_ext
+
+    # SON YAYIN KAPISI: hangi servis gönderirse göndersin Telegram'a çıkan bütün
+    # amazon.com.tr bağlantılarında affiliate tag zorunlu olsun.
+    def _affiliate_url(url):
+        if not isinstance(url,str) or 'amazon.com.tr' not in url.lower():return url
+        try:
+            p=urlsplit(url)
+            if not p.netloc.lower().endswith('amazon.com.tr'):return url
+            q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower()!='tag']
+            q.append(('tag',ts.AMAZON_TAG))
+            return urlunsplit((p.scheme,p.netloc,p.path,urlencode(q,doseq=True),p.fragment))
+        except Exception:
+            return url+('&' if '?' in url else '?')+'tag='+ts.AMAZON_TAG
+
+    def _walk_affiliate(obj):
+        if isinstance(obj,dict):
+            out={}
+            for k,v in obj.items():
+                out[k]=_affiliate_url(v) if k=='url' and isinstance(v,str) else _walk_affiliate(v)
+            return out
+        if isinstance(obj,list):return [_walk_affiliate(x) for x in obj]
+        if isinstance(obj,str):
+            return re.sub(r'https?://(?:www\.)?amazon\.com\.tr/[^\s<>"\']+',lambda m:_affiliate_url(m.group(0)),obj,flags=re.I)
+        return obj
+
+    _requests_post=requests.post
+    def guarded_post(url,*args,**kwargs):
+        if isinstance(url,str) and 'api.telegram.org/' in url:
+            if isinstance(kwargs.get('json'),dict):kwargs['json']=_walk_affiliate(kwargs['json'])
+            if isinstance(kwargs.get('data'),dict):
+                data=dict(kwargs['data'])
+                rm=data.get('reply_markup')
+                if isinstance(rm,str):
+                    try:data['reply_markup']=json.dumps(_walk_affiliate(json.loads(rm)),ensure_ascii=False)
+                    except Exception:pass
+                elif isinstance(rm,(dict,list)):data['reply_markup']=_walk_affiliate(rm)
+                for k in ('text','caption'):
+                    if isinstance(data.get(k),str):data[k]=_walk_affiliate(data[k])
+                kwargs['data']=data
+        return _requests_post(url,*args,**kwargs)
+    requests.post=guarded_post
 
     # Direct/web/fast yayın kapıları yerel publish_log kullanıyor. Eski Telegram
     # yolu yalnız Supabase'e yazmışsa da aynı ürünü tekrar basmamak için fallback.
