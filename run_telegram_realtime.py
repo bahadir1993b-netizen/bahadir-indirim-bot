@@ -51,13 +51,21 @@ def _photo_from_html(body):
     return None
 
 def source_photo(source,post_id,product_url=None,page_image=None):
-    if page_image:return page_image
+    # Önce kaynak Telegram gönderisinin fotoğrafını kullan: genelde doğrudan ürün görselidir
+    # ve Telegram CDN'den indirilebildiği için sendPhoto daha güvenilir çalışır.
     channel=ts.SOURCES.get(source);urls=[]
     if channel and post_id:urls += [f'https://t.me/{channel}/{post_id}?embed=1&mode=tme',f'https://t.me/s/{channel}/{post_id}']
-    if product_url:urls.append(product_url)
     for url in urls:
         try:
             r=requests.get(url,headers=ts.HEAD,timeout=9,allow_redirects=True)
+            if r.ok:
+                p=_photo_from_html(r.text)
+                if p:return p
+        except Exception:pass
+    if page_image:return page_image
+    if product_url:
+        try:
+            r=requests.get(product_url,headers=ts.HEAD,timeout=9,allow_redirects=True)
             if r.ok:
                 p=_photo_from_html(r.text)
                 if p:return p
@@ -128,22 +136,29 @@ def send_clean(s,u,t,c,p,source,post_id,signal,coupon=None,campaign=None,page_im
         lines.append(f'🎯 Kampanya: {html.escape(campaign.get("label") or "Kampanyalı alım")}')
         if campaign.get('qty'):lines.append(f'📦 {campaign["qty"]} adet alımda geçerli')
     if coupon:lines.append(f'🎟️ Kupon: {html.escape(coupon)}')
-    lines += ['',f'👇 <a href="{html.escape(u,quote=True)}"><b>Fırsata git</b></a>']
+    # Ürün linkini mesaj gövdesine koymuyoruz. Sadece butonda tutuyoruz.
+    # Böylece Telegram'ın dev Amazon/mağaza link önizlemesi oluşması imkânsız hale gelir.
+    lines += ['','👇 Fırsata git']
     text='\n'.join(lines);keyboard={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':u}]]}
-    photo=source_photo(source,post_id,u,page_image);rr=None
+    photo=source_photo(source,post_id,u,page_image);rr=None;photo_state='yok'
     if photo:
         try:
-            img=requests.get(photo,headers=ts.HEAD,timeout=12)
-            if img.ok and img.content:
-                rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendPhoto',data={'chat_id':ts.CHAT,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(keyboard,ensure_ascii=False)},files={'photo':('product.jpg',img.content,img.headers.get('content-type','image/jpeg'))},timeout=22)
-        except Exception:rr=None
+            img=requests.get(photo,headers=ts.HEAD,timeout=12,allow_redirects=True)
+            ctype=(img.headers.get('content-type') or '').lower()
+            if img.ok and img.content and ('image/' in ctype or len(img.content)>5000):
+                ext='png' if 'png' in ctype else 'webp' if 'webp' in ctype else 'jpg'
+                rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendPhoto',data={'chat_id':ts.CHAT,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(keyboard,ensure_ascii=False)},files={'photo':(f'product.{ext}',img.content,ctype or 'image/jpeg')},timeout=25)
+                photo_state='gönderildi' if rr.ok else f'telegram-hata-{rr.status_code}'
+        except Exception as e:
+            photo_state=f'indirme-hata-{type(e).__name__}';rr=None
     if not rr or not rr.ok:
+        # Fotoğraf alınamazsa bile mesajda URL bulunmadığı için hiçbir link kartı oluşamaz.
         rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendMessage',json={'chat_id':ts.CHAT,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'link_preview_options':{'is_disabled':True},'reply_markup':keyboard},timeout=18)
     rr.raise_for_status()
     if isinstance(row,dict) and row.get('id'):ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat()})
     try:ts.sb('POST','price_history',json={'price':c,'product_url':u,'site':s,'recorded_at':datetime.now(timezone.utc).isoformat()})
     except Exception:pass
-    ts.remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL | ref={p or 0:.2f} | kaynak={ref_source} | kampanya={campaign.get("label") if campaign else "yok"} | foto={"var" if photo else "yok"}');return True
+    ts.remember(key);print(f'GÖNDERİLDİ | {s} | {c:.2f} TL | ref={p or 0:.2f} | kaynak={ref_source} | kampanya={campaign.get("label") if campaign else "yok"} | foto={photo_state}');return True
 
 def _infer_quantity_campaign(signal,source_price,live):
     if not live or not source_price or source_price>=live*.97:return None
