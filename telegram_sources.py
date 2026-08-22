@@ -13,7 +13,7 @@ if SB.endswith('/rest/v1'): SB=SB[:-8].rstrip('/')
 MAX_AGE=30
 MIN_DISCOUNT=6.0
 COOLDOWN=12
-AMAZON_TAG=os.getenv('AMAZON_ASSOCIATE_TAG','').strip()
+AMAZON_TAG=(os.getenv('AMAZON_ASSOCIATE_TAG') or os.getenv('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
 SOURCES={'OnuAl':'onual_firsat','EnesOzen':'enesozen','OzelFirsatlar':'ozelfirsat','AmazonOzel':'amazonozel','FirsatZ':'firsatz','FirsatMerkezi':'firsatmerkez','IndirimDeal':'indirimdeal'}
 MARKET={'amazon.com.tr':'Amazon','hepsiburada.com':'Hepsiburada','trendyol.com':'Trendyol'}
@@ -80,7 +80,7 @@ def valid(s,u):
 def normalize(s,u):
  if not u or s not in MARKET.values():return None
  p=urlparse(clean(u)); q=[(k,v) for k,v in parse_qsl(p.query,keep_blank_values=True) if k.lower() not in TRACKING]
- if s=='Amazon' and AMAZON_TAG:q.append(('tag',AMAZON_TAG))
+ if s=='Amazon':q.append(('tag',AMAZON_TAG))
  return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(q,doseq=True),''))
 
 def tokens(text):
@@ -92,20 +92,25 @@ def title_score(title,candidate_text):
 
 def http_resolve(u,s):
  try:
-  r=requests.get(clean(u),headers=HEAD,timeout=5,allow_redirects=True); f=clean(r.url); ss=site(f)
+  r=requests.get(clean(u),headers=HEAD,timeout=7,allow_redirects=True); f=clean(r.url); ss=site(f)
   if ss and valid(ss,f):return normalize(ss,f)
   soup=BeautifulSoup(r.text,'html.parser')
+  for sel,attr in [('link[rel="canonical"]','href'),('meta[property="og:url"]','content')]:
+   e=soup.select_one(sel)
+   if e:
+    h=clean(e.get(attr) or '')
+    if site(h)==s and valid(s,h):return normalize(s,h)
   for a in soup.select('a[href]'):
    h=clean(a.get('href') or '')
    if site(h)==s and valid(s,h):return normalize(s,h)
- except:pass
+ except Exception as e:print(f'LINK ÇÖZ UYARI | {s} | {type(e).__name__}')
  return None
 
 def search_marketplace_http(s,title):
  base={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q='}.get(s)
  if not base or not title:return None
  try:
-  r=requests.get(base+requests.utils.quote(' '.join(title.split())[:140]),headers=HEAD,timeout=6)
+  r=requests.get(base+requests.utils.quote(' '.join(title.split())[:140]),headers=HEAD,timeout=7)
   if r.status_code>=400:return None
   soup=BeautifulSoup(r.text,'html.parser'); candidates=[]
   for a in soup.select('a[href]'):
@@ -113,8 +118,8 @@ def search_marketplace_http(s,title):
    if valid(s,u):candidates.append((title_score(title,(a.get_text(' ',strip=True) or '')[:500]+' '+u),u))
   if candidates:
    score,u=max(candidates,key=lambda x:x[0])
-   if score>=0.25:return normalize(s,u)
- except:pass
+   if score>=0.50:return normalize(s,u)
+ except Exception as e:print(f'ARAMA UYARI | {s} | {type(e).__name__}')
  return None
 
 def search_marketplace_browser(page,s,title):
@@ -127,8 +132,8 @@ def search_marketplace_browser(page,s,title):
    if valid(s,u):candidates.append((title_score(title,(a.inner_text() or '')[:500]+' '+u),u))
   if candidates:
    score,u=max(candidates,key=lambda x:x[0])
-   if score>=0.25:return normalize(s,u)
- except:pass
+   if score>=0.50:return normalize(s,u)
+ except Exception as e:print(f'BROWSER ARAMA UYARI | {s} | {type(e).__name__}')
  return None
 
 def resolve(page,u,s,title): return http_resolve(u,s) or search_marketplace_http(s,title) or search_marketplace_browser(page,s,title)
@@ -149,7 +154,7 @@ def marketplace_price_check(s,u,expected):
   current=min(vals,key=lambda x:abs(x-expected))
   if abs(current-expected)/max(expected,1)>0.35:return None,None
   return current,max((x for x in vals if x>current),default=None)
- except:return None,None
+ except Exception as e:print(f'FİYAT KONTROL UYARI | {s} | {type(e).__name__}');return None,None
 
 def coupon_code(text):
  pats=[r'\b(?:KOD|KODU|KUPON|KUPON KODU|PROMOSYON(?: KODU)?)\s*[:=\-]?\s*([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{3,23})\b',r'\b([A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9_-]{4,23})\s+(?:KOD(?:U)?|KUPON(?:U)?)\b']
@@ -172,7 +177,7 @@ def save(s,u,t,c,p):
 def send(s,u,t,c,p,source,post_id,signal,coupon=None):
  if not valid(s,u):print(f'ATLANDI | {source}:{post_id} | geçersiz link');return False
  key=f'{source}:{post_id}'
- if seen(key):return False
+ if seen(key):print(f'ATLANDI | {source}:{post_id} | daha önce işlendi');return False
  disc=(p-c)/p*100 if p and p>c else None
  if disc is not None and disc<MIN_DISCOUNT:print(f'ATLANDI | {source}:{post_id} | %{disc:.1f} < %{MIN_DISCOUNT}');remember(key);return False
  if disc is None and not coupon and not DEAL_WORDS.search(signal or ''):print(f'ATLANDI | {source}:{post_id} | kampanya sinyali yok');remember(key);return False
@@ -180,7 +185,7 @@ def send(s,u,t,c,p,source,post_id,signal,coupon=None):
  if last:
   try:
    if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN):print(f'ATLANDI | {source}:{post_id} | cooldown');remember(key);return False
-  except:pass
+  except Exception:pass
  lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else ('🎟️ KUPONLU FIRSAT' if coupon else '🔥 FIRSAT'),' ',f'🛍️ {t}',f'💰 {c:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.')]
  if p and p>c:lines.append(f'🏷️ Önceki: {p:,.2f} TL'.replace(',','X').replace('.',',').replace('X','.'))
  if coupon:lines.append(f'🎟️ Kupon: {coupon}')
@@ -191,37 +196,58 @@ def send(s,u,t,c,p,source,post_id,signal,coupon=None):
  remember(key); print(f'GÖNDERİLDİ | {s} | {c:.2f} TL'+(f' | %{disc:.1f}' if disc is not None else '')); return True
 
 def extract_title(raw):
- parts=[x.strip(' -•') for x in re.split(r'\s{2,}|\n',raw) if x.strip()]
- for p in parts:
-  if len(p)>12 and not re.fullmatch(r'.*(TL|₺|KOD|KUPON).*',p,re.I):return p[:180]
- return raw[:180]
+ t=htmlmod.unescape(raw or '')
+ t=re.sub(r'(?i)^\s*(?:FirsatZ\s*-\s*İndirim Kanalı|FırsatZ\s*-\s*İndirim Kanalı|ÖZEL FIRSATLAR\s*-\s*Güncel İndirimler|Amazon İndirimleri\s*-\s*Özel Fırsatlar|Fırsat Merkezi)\s*',' ',t)
+ t=re.sub(r'@[A-Za-z0-9_]+|#(?:tanıtım|tanitim|reklam|işbirliği|isbirligi)',' ',t,flags=re.I)
+ m=MONEY_RE.search(t)
+ if m:t=t[:m.start()]
+ t=re.sub(r'[🔥✅🔻🔗👉👇📣🛍️🎯🎁💰🏷️📱📢]+',' ',t)
+ t=re.sub(r'\s+',' ',t).strip(' -|•:')
+ if len(t)>=5:return t[:180]
+ return ''
 
 def process(source,b,page):
+ post_id=b.get('data-post','').split('/')[-1]
  tx=b.select_one('.tgme_widget_message_text')
- if not tx:return False
+ if not tx:print(f'ATLANDI | {source}:{post_id} | mesaj_metni_yok');return False
  raw=tx.get_text(' ',strip=True); links=[clean(a.get('href') or '') for a in b.select('a[href]')]
  s=next((site(x) for x in links if site(x)),None) or next((x for x in MARKET.values() if re.search(r'\b'+re.escape(x)+r'\b',raw,re.I)),None)
- if not s:return False
+ if not s:print(f'ATLANDI | {source}:{post_id} | mağaza_bulunamadı');return False
  current,old=source_pair(raw)
- if not current:return False
+ if not current:print(f'ATLANDI | {source}:{post_id} | fiyat_bulunamadı');return False
+ title=extract_title(raw)
+ if not title:print(f'ATLANDI | {source}:{post_id} | ürün_adı_bulunamadı');return False
  saving,effective=coupon_savings(raw,current); coupon=coupon_code(raw)
  if effective and effective<current:current=effective
- if old is None and links:
-  direct=next((normalize(s,x) for x in links if valid(s,x)),None)
-  if direct:
-   mc,mo=marketplace_price_check(s,direct,source_pair(raw)[0])
-   if mc and abs(mc-current)/max(current,1)<0.35:current=mc
-   if mo and mo>current:old=mo
- u=next((normalize(s,x) for x in links if valid(s,x)),None)
- if not u:u=resolve(page,links[0] if links else '',s,extract_title(raw))
- if not u:return False
+ market_links=[x for x in links if site(x)==s]
+ direct=next((normalize(s,x) for x in market_links if valid(s,x)),None)
+ if old is None and direct:
+  mc,mo=marketplace_price_check(s,direct,source_pair(raw)[0])
+  if mc and abs(mc-current)/max(current,1)<0.35:current=mc
+  if mo and mo>current:old=mo
+ u=direct
+ if not u:
+  short=next((x for x in market_links if x),None)
+  if short:print(f'LINK ÇÖZ | {source}:{post_id} | {s} | {urlparse(short).netloc}')
+  u=resolve(page,short or '',s,title)
+ if not u:
+  print(f'ATLANDI | {source}:{post_id} | ürün_linki_bulunamadı | mağaza={s} | market_link={bool(market_links)}');return False
  if old is None and saving>0:old=current+saving
- return send(s,u,extract_title(raw),current,old,source,b.get('data-post','').split('/')[-1],raw,coupon)
+ print(f'ADAY HAZIR | {source}:{post_id} | {s} | fiyat={current:.2f} | ref={old or 0:.2f} | {title[:80]}')
+ return send(s,u,title,current,old,source,post_id,raw,coupon)
 
 def fetch_source(item):
  source,channel=item
- try:return source,requests.get(f'https://t.me/s/{channel}',headers=HEAD,timeout=8)
- except Exception as e:print(f'Telegram kaynak hata {source}: {type(e).__name__}: {e}');return source,None
+ last=None
+ for attempt in range(1,4):
+  try:
+   r=requests.get(f'https://t.me/s/{channel}',headers=HEAD,timeout=(4,10))
+   if attempt>1:print(f'Telegram kaynak kurtarıldı {source} | deneme={attempt}')
+   return source,r
+  except Exception as e:
+   last=e
+   if attempt<3:continue
+ print(f'Telegram kaynak hata {source}: {type(last).__name__}: {last}');return source,None
 
 def main():
  print(f'=== Telegram fırsat keşfi başladı | eşik=%{MIN_DISCOUNT} | yaş={MAX_AGE} dk ==='); fetched=[]
