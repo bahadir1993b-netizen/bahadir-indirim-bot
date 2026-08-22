@@ -62,7 +62,6 @@ def _direct_from_response(resp,site):
             if m:
                 u=urljoin(final,m.group(1).strip(' \"\''))
                 if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
-        # JS/deeplink sayfalarında gömülü gerçek mağaza URL'sini tara.
         for m in re.finditer(r'https?://[^\s\"\'<>]+',body,re.I):
             u=ts.clean(m.group(0).rstrip('),;'))
             if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
@@ -124,8 +123,6 @@ def resolve_product_url(site,links,title):
         except Exception:pass
     u=_search_store(site,title)
     if u:return u
-    # Güvenilir Telegram fırsatını yalnızca canonical URL çözülemedi diye kaçırma.
-    # Amazon'da affiliate zorunlu olduğu için kısa link fallback kullanılmaz.
     if short_fallback and site!='Amazon':
         print(f'FAST LINK FALLBACK | {site} | {short_fallback}')
         return short_fallback
@@ -141,6 +138,21 @@ def _meta_from_url(url):
         if e:image=e.get('content') or ''
         return title,image
     except:return 'Fırsat Ürünü',''
+
+def _fetch_channel(channel,source):
+    url=f'https://t.me/s/{channel}?v={time.time_ns()}'
+    last=None
+    for attempt in range(1,4):
+        try:
+            r=requests.get(url,headers=HEAD,timeout=(4,10))
+            if r.ok:
+                if attempt>1:print(f'FAST KAYNAK KURTARILDI | {source} | deneme={attempt}')
+                return r
+            last=f'HTTP {r.status_code}'
+        except Exception as e:
+            last=f'{type(e).__name__}: {e}'
+        if attempt<3:time.sleep(0.7*attempt)
+    raise RuntimeError(last or 'telegram_kaynak_alinamadi')
 
 def send(site,url,title,current,ref,campaign,image,row):
     disc=(ref-current)/ref*100 if ref and ref>current else None
@@ -196,9 +208,8 @@ def main():
     for source in TRUSTED:
         channel=ts.SOURCES.get(source)
         if not channel:continue
-        try:r=requests.get(f'https://t.me/s/{channel}?v={time.time_ns()}',headers=HEAD,timeout=4)
+        try:r=_fetch_channel(channel,source)
         except Exception as e:errors+=1;print(f'FAST KAYNAK HATA | {source} | {type(e).__name__}: {e}');continue
-        if not r.ok:print(f'FAST KAYNAK HATA | {source} | HTTP {r.status_code}');continue
         blocks=[]
         for b in BeautifulSoup(r.text,'html.parser').select('.tgme_widget_message')[-12:]:
             tm=b.select_one('time[datetime]')
