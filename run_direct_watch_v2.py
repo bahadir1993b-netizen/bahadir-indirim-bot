@@ -4,6 +4,7 @@ from urllib.parse import urlparse,urlunparse,urlencode
 import requests
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
+from deal_validation import campaign_from_text
 
 BASE=(os.environ.get('SUPABASE_URL') or '').rstrip('/')
 if BASE.endswith('/rest/v1'): BASE=BASE[:-8].rstrip('/')
@@ -50,6 +51,7 @@ def site_of(u,stored=''):
     if 'amazon.com.tr' in h:return 'Amazon'
     if 'hepsiburada.com' in h:return 'Hepsiburada'
     if 'trendyol.com' in h:return 'Trendyol'
+    if 'n11.com' in h:return 'N11'
     return stored or ''
 
 def outlink(u,site):
@@ -78,18 +80,14 @@ def parse_html(body,expected=None,site=''):
         e=soup.select_one(sel)
         if e and (e.get(attr) or '').startswith('http'):image=e.get(attr);break
 
-    # Primary buy-box selectors are trusted over stale expected/catalog prices.
     if site=='Amazon':
-        primary=_prices(soup,[
-          ('#corePrice_feature_div .a-price .a-offscreen',None),
-          ('#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',None),
-          ('.apexPriceToPay .a-offscreen',None),
-          ('#price_inside_buybox',None),('#priceblock_ourprice',None),('#priceblock_dealprice',None)
-        ])
+        primary=_prices(soup,[('#corePrice_feature_div .a-price .a-offscreen',None),('#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',None),('.apexPriceToPay .a-offscreen',None),('#price_inside_buybox',None),('#priceblock_ourprice',None),('#priceblock_dealprice',None)])
     elif site=='Trendyol':
         primary=_prices(soup,[('.prc-dsc',None),('.prc-slg',None),('[data-test-id="price-current-price"]',None),('[class*="discountedPrice"]',None)])
     elif site=='Hepsiburada':
         primary=_prices(soup,[('[data-test-id="price-current-price"]',None),('[class*="currentPrice"]',None),('[class*="salePrice"]',None)])
+    elif site=='N11':
+        primary=_prices(soup,[('[class*="newPrice"]',None),('[class*="price"]',None),('[itemprop="price"]','content')])
     else: primary=[]
 
     generic=_prices(soup,[('meta[property="product:price:amount"]','content'),('meta[itemprop="price"]','content'),('[itemprop="price"]','content'),('.a-price .a-offscreen',None),('[data-test-id="price-current-price"]',None),('[class*="currentPrice"]',None),('[class*="salePrice"]',None),('.prc-dsc',None),('.prc-slg',None)])
@@ -97,7 +95,6 @@ def parse_html(body,expected=None,site=''):
     live=[p for p in live if 1<p<10000000]
     cur=None
     if live:
-        # First primary displayed price wins; generic uses median-low cluster, never "closest to expected".
         if primary:cur=float(primary[0])
         else:
             vals=sorted(live);med=statistics.median(vals);cluster=[p for p in vals if med*.70<=p<=med*1.30];cur=float(statistics.median(cluster or vals))
@@ -111,7 +108,13 @@ def parse_html(body,expected=None,site=''):
     if cur:
         cand=[x for x in old if cur*1.03<x<=cur*1.8]
         if cand:oldv=float(min(cand))
-    return {'oos':False,'live':cur,'old':oldv,'title':title,'image':image,'source':'page-primary' if primary else 'page-generic'}
+    campaign=None
+    if cur:
+        try:
+            campaign=(campaign_from_text(text,cur) or {}).get('best')
+            if campaign and (not campaign.get('effective') or campaign['effective']>=cur*.99):campaign=None
+        except Exception:campaign=None
+    return {'oos':False,'live':cur,'old':oldv,'title':title,'image':image,'campaign':campaign,'source':'page-primary' if primary else 'page-generic'}
 
 def http_check(url,expected=None):
     try:
@@ -156,12 +159,12 @@ def send(row,current,ref,title,image,site):
             if datetime.now(timezone.utc)-datetime.fromisoformat(last.replace('Z','+00:00'))<timedelta(hours=COOLDOWN_HOURS):STATS['cooldown']+=1;return False
         except:pass
     disc=(ref-current)/ref*100;url=outlink(row['product_url'],site)
-    lines=['⭐️⭐️⭐️ 🔥 %%.0f İNDİRİM'%disc,'',f'🛍️ {html.escape(title)}',f'💰 {fmt(current)} TL',f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site}','','👇 <a href="'+html.escape(url,quote=True)+'"><b>Fırsata git</b></a>']
+    lines=['⭐️⭐️⭐️ 🔥 %%.0f İNDİRİM'%disc,'',f'🛍️ {html.escape(title)}',f'💰 {fmt(current)} TL',f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site}','','👇 Fırsata git']
     text='\n'.join(lines);kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':url}]]};resp=None
     if image:
         try:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHANNEL_ID,'photo':image,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(kb,ensure_ascii=False)},timeout=18)
         except:resp=None
-    if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','disable_web_page_preview':False,'reply_markup':kb},timeout=18)
+    if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'link_preview_options':{'is_disabled':True},'reply_markup':kb},timeout=18)
     if not resp.ok:raise RuntimeError(f'Telegram {resp.status_code}: {resp.text[:180]}')
     sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat(),'last_posted_price':current});STATS['sent']+=1;return True
 
@@ -170,7 +173,7 @@ def load_catalog():
     good=[]
     for r in rows:
         u=r.get('product_url') or '';s=site_of(u,r.get('site') or '')
-        if s not in {'Amazon','Hepsiburada','Trendyol'} or not u.startswith('http'):continue
+        if s not in {'Amazon','Hepsiburada','Trendyol','N11'} or not u.startswith('http'):continue
         r['site']=s;good.append(r)
         if len(good)>=MAX_PRODUCTS:break
     return good
@@ -187,14 +190,17 @@ def main():
                 if info and info.get('live'):STATS['http_live']+=1
                 if (not info or not info.get('live')) and browser_used<BROWSER_LIMIT:browser_used+=1;STATS['browser']+=1;info=browser_check(page,url,expected) or info
                 if not info or not info.get('live'):STATS['no_price']+=1;print(f'FİYAT YOK: {site} | {row.get("product_name","")[:90]}');continue
-                current=float(info['live']);hist=history(url);ref,rsrc=reference(current,hist,info.get('old'),num(row.get('previous_price')));maybe_write_history(url,site,current,hist)
-                title=(info.get('title') or row.get('product_name') or 'Ürün')[:300];sb('PATCH',f'products?id=eq.{row["id"]}',json={'product_name':title,'current_price':current,'product_url':url,'site':site,'updated_at':datetime.now(timezone.utc).isoformat()})
+                normal=float(info['live']);camp=info.get('campaign');current=float(camp['effective']) if camp and camp.get('effective') else normal
+                hist=history(url);ref,rsrc=reference(current,hist,info.get('old'),num(row.get('previous_price')))
+                if camp and normal>current*1.03:ref,rsrc=normal,'page-campaign'
+                maybe_write_history(url,site,normal,hist)
+                title=(info.get('title') or row.get('product_name') or 'Ürün')[:300];sb('PATCH',f'products?id=eq.{row["id"]}',json={'product_name':title,'current_price':normal,'product_url':url,'site':site,'updated_at':datetime.now(timezone.utc).isoformat()})
                 if not ref:STATS['no_ref']+=1;continue
-                disc=(ref-current)/ref*100;print(f'KONTROL: {site} | {current:.2f} -> ref {ref:.2f} | %{disc:.1f} | {title[:70]}')
+                disc=(ref-current)/ref*100;print(f'KONTROL: {site} | {current:.2f} -> ref {ref:.2f} | %{disc:.1f} | kampanya={camp.get("label") if camp else "yok"} | {title[:70]}')
                 if disc<MIN_DISCOUNT:STATS['below']+=1;continue
                 send(row,current,ref,title,info.get('image'),site)
             except Exception as e:STATS['errors']+=1;print(f'ÜRÜN HATA: {type(e).__name__}: {e}')
         browser.close()
-    print('=== API-SİZ V2 BİTTİ | '+' | '.join(f'{k}={v}' for k,v in STATS.items())+' ===')
+    print(f'=== API-SİZ V2 BİTTİ | '+ ' | '.join(f'{k}={v}' for k,v in STATS.items())+' ===')
 
 if __name__=='__main__':main()
