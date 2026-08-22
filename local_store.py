@@ -18,6 +18,25 @@ def canonical(url):
         return urlunparse(('https',p.netloc.lower(),p.path.rstrip('/'),'','',''))
     except:return url or ''
 
+def publication_key(url):
+    """Stable identity only for duplicate/publish tracking; never used to fetch pages."""
+    try:
+        p=urlparse(url or '');host=p.netloc.lower().replace('www.','');path=p.path
+        if host.endswith('amazon.com.tr'):
+            m=re.search(r'/(?:dp|gp/product)/([A-Z0-9]{8,12})(?:[/?]|$)',path,re.I)
+            if m:return 'product://amazon/'+m.group(1).upper()
+        if host.endswith('hepsiburada.com'):
+            m=re.search(r'-p-([A-Za-z0-9]+)(?:[/?]|$)',path,re.I)
+            if m:return 'product://hepsiburada/'+m.group(1).lower()
+        if host.endswith('trendyol.com'):
+            m=re.search(r'-p-(\d+)(?:[/?]|$)',path,re.I)
+            if m:return 'product://trendyol/'+m.group(1)
+        if host.endswith('n11.com'):
+            m=re.search(r'/urun/([^/?#]+)',path,re.I)
+            if m:return 'product://n11/'+m.group(1).lower()
+    except:pass
+    return canonical(url)
+
 def conn():
     os.makedirs(os.path.dirname(DB_PATH),exist_ok=True)
     c=sqlite3.connect(DB_PATH,timeout=20)
@@ -84,10 +103,14 @@ def conn():
     return c
 
 def recently_published(url,price,days=30,min_drop=0.05):
-    url=canonical(url)
-    if not url or not price:return False
+    key=publication_key(url)
+    if not key or not price:return False
     with _lock:
-        c=conn();r=c.execute('SELECT price,published_at FROM publish_log WHERE url=?',(url,)).fetchone();c.close()
+        c=conn();r=c.execute('SELECT price,published_at FROM publish_log WHERE url=?',(key,)).fetchone()
+        if not r:
+            # Backward compatibility with entries written before product-ID keys existed.
+            old_key=canonical(url);r=c.execute('SELECT price,published_at FROM publish_log WHERE url=?',(old_key,)).fetchone() if old_key!=key else None
+        c.close()
     if not r:return False
     try:
         dt=datetime.fromisoformat(str(r['published_at']).replace('Z','+00:00'))
@@ -97,12 +120,12 @@ def recently_published(url,price,days=30,min_drop=0.05):
     except:return False
 
 def mark_published(url,price,source=''):
-    url=canonical(url)
-    if not url or not price:return
+    key=publication_key(url)
+    if not key or not price:return
     with _lock:
         c=conn();c.execute('''INSERT INTO publish_log(url,price,published_at,source) VALUES(?,?,?,?)
           ON CONFLICT(url) DO UPDATE SET price=excluded.price,published_at=excluded.published_at,source=excluded.source''',
-          (url,float(price),_now(),str(source or '')));c.commit();c.close()
+          (key,float(price),_now(),str(source or '')));c.commit();c.close()
 
 def runtime_start(service,details=None):
     now=_now()
