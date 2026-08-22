@@ -6,7 +6,7 @@ import telegram_sources as ts
 from deal_validation import inspect_page
 
 TRUSTED={'OzelFirsatlar','AmazonOzel','FirsatMerkezi'}
-MAX_AGE=max(3,int(os.environ.get('FAST_LANE_MAX_AGE','12')))
+MAX_AGE=max(3,int(os.environ.get('FAST_LANE_MAX_AGE','60')))
 MIN_DISC=max(3.0,float(os.environ.get('FAST_LANE_MIN_DISCOUNT','5')))
 HEAD=dict(ts.HEAD);HEAD.update({'Cache-Control':'no-cache, no-store, max-age=0','Pragma':'no-cache'})
 
@@ -39,6 +39,9 @@ def qty_hint(text):
 def explicit_unit(text):
     return bool(re.search(r'(?i)(?:tanesi|birim|adet(?:\s+başına)?|\d+\s*adet\s*alımda|\d+\s*adet\s*alimda)',text or ''))
 
+def payment_hint(text):
+    return bool(re.search(r'(?i)\b(?:ödeme|odeme)\s+(?:adımında|adiminda|anında|aninda)|\bsepette\b|\bkasada\b',text or ''))
+
 def recently_posted(row,current):
     last=row.get('last_posted_at') if isinstance(row,dict) else None
     if not last:return False
@@ -49,13 +52,14 @@ def recently_posted(row,current):
     except:return False
 
 def send(site,url,title,current,ref,campaign,image,row):
-    disc=(ref-current)/ref*100
-    lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}']
+    disc=(ref-current)/ref*100 if ref and ref>current else None
+    lines=[f'🔥 %{disc:.0f} İNDİRİM' if disc is not None else '🔥 FIRSAT','',f'🛍️ {html.escape(title)}']
     if campaign:
         lines.append(f'💰 Efektif birim fiyat: {fmt(current)} TL')
         lines.append(f'🎯 Kampanya: {html.escape(campaign)}')
     else:lines.append(f'💰 {fmt(current)} TL')
-    lines += [f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site}','','👇 Fırsata git']
+    if ref and ref>current:lines.append(f'🏷️ Referans fiyat: {fmt(ref)} TL')
+    lines += [f'🛍️ {site}','','👇 Fırsata git']
     text='\n'.join(lines);kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':url}]]};rr=None
     if image:
         try:
@@ -71,16 +75,13 @@ def send(site,url,title,current,ref,campaign,image,row):
         ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat(),'last_posted_price':current})
     try:ts.sb('POST','price_history',json={'price':current,'product_url':url,'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
     except Exception:pass
-    print(f'FAST GÖNDERİLDİ | {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | {campaign or "normal"}')
+    if disc is not None:print(f'FAST GÖNDERİLDİ | {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | {campaign or "normal"}')
+    else:print(f'FAST GÖNDERİLDİ | {site} | {current:.2f} | referans_yok-güvenilir-kampanya | {campaign or "fırsat"}')
     return True
 
 def process(source,b,page):
     post_id=b.get('data-post','').split('/')[-1]
     key=fast_key(source,post_id) if post_id else ''
-    # IMPORTANT: fast lane has its own seen namespace. The regular Telegram
-    # scanner may mark a source post as seen even when it rejects the deal;
-    # sharing the old key made the fast lane silently skip exactly the deals
-    # it was added to rescue.
     if not post_id or ts.seen(key):return False
     tx=b.select_one('.tgme_widget_message_text')
     if not tx:return False
@@ -106,14 +107,20 @@ def process(source,b,page):
     if not effective and live and q and explicit_unit(raw) and cur<live*.97 and cur>=live/max(q,2)*.80:
         effective=float(cur);label=f'{q} adet alımda geçerli'
     if not effective:effective=float(cur)
+    if payment_hint(raw) and not label:label='Ödeme adımında geçerli'
     refs=[x for x in [live,pg.get('old'),old] if x and float(x)>effective*1.03 and float(x)<=effective*2.2]
     ref=min(map(float,refs)) if refs else None
     if not ref and live and effective<live*.95:ref=float(live)
-    if not ref:
+    # Öncelikli, güvenilir kaynaklardaki ödeme-adımı/sepette fırsatlarını sırf
+    # referans fiyat çekilemedi diye kaçırma. Bu durumda yüzde iddiası yapmadan
+    # temiz 'FIRSAT' formatında yayınla.
+    trusted_payment_rescue = source in TRUSTED and payment_hint(raw)
+    if not ref and not trusted_payment_rescue:
         print(f'FAST ATLANDI | {source}:{post_id} | referans_yok | kaynak={cur:.2f} canlı={live or 0:.2f}');return False
-    disc=(ref-effective)/ref*100
-    if disc<MIN_DISC:
-        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | %{disc:.1f}');return False
+    if ref:
+        disc=(ref-effective)/ref*100
+        if disc<MIN_DISC:
+            ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | %{disc:.1f}');return False
     row=ts.save(site,u,title,effective,ref)
     if recently_posted(row,effective):
         ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | duplicate-30d');return False
