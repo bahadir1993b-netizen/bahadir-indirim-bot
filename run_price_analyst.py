@@ -7,6 +7,7 @@ import archive_store as ar
 DB=os.environ.get('LOCAL_PRICE_DB','/app/data/price_memory.db')
 TOKEN=os.environ.get('TELEGRAM_BOT_TOKEN','').strip();CHANNEL=os.environ.get('TELEGRAM_CHANNEL_ID','-1004424116637')
 MIN=float(os.environ.get('MIN_DISCOUNT','15'));MAX_ALERTS=max(1,int(os.environ.get('ANALYST_MAX_ALERTS','4')))
+PUBLISH=str(os.environ.get('ANALYST_PUBLISH','0')).strip().lower() in {'1','true','yes','on'}
 AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
 HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9,en;q=0.8'}
 
@@ -84,6 +85,9 @@ def page_meta(url):
     except:return '',None
 
 def send(title,current,ref,url,source):
+    if not PUBLISH:
+        print(f'ANALİST YAYIN KAPALI | {current:.2f}->{ref:.2f} | {str(title)[:70]}')
+        return False
     if not TOKEN or not CHANNEL:return False
     disc=(ref-current)/ref*100;site=site_of(url);u=outlink(url)
     page_title,image=page_meta(url)
@@ -134,6 +138,6 @@ def main():
     for disc,p,r,current,ref,dedupe in signals[:MAX_ALERTS]:
         if send(r.get('title') or p.get('title') or 'Ürün',current,ref,r.get('product_url') or '',r.get('source') or ''):
             mark(dedupe,current);sent+=1;print(f'ANALİST GÖNDERDİ | %{disc:.1f} | {current:.2f}->{ref:.2f} | {str(r.get("title"))[:70]}')
-    print(f'=== FİYAT ANALİSTİ | profil={len(profiles)} | taze_linkli={len(by)} | sinyal={len(signals)} | gönderilen={sent} | arşiv={ar.stats()} ===')
+    print(f'=== FİYAT ANALİSTİ | profil={len(profiles)} | taze_linkli={len(by)} | sinyal={len(signals)} | gönderilen={sent} | yayın={"AÇIK" if PUBLISH else "KAPALI"} | arşiv={ar.stats()} ===')
 
 if __name__=='__main__':main()
