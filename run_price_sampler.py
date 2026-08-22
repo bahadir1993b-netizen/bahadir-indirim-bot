@@ -10,8 +10,8 @@ SLEEP=max(0.05,float(os.environ.get('PRICE_SAMPLE_SLEEP','0.15')))
 DEAL_PCT=max(5.0,float(os.environ.get('PRICE_SAMPLE_DEAL_PCT','15')))
 BROWSER_LIMIT=max(0,int(os.environ.get('PRICE_SAMPLE_BROWSER_LIMIT','80')))
 PRIORITY_SHARE=min(.90,max(.20,float(os.environ.get('PRICE_SAMPLE_PRIORITY_SHARE','0.70'))))
-CURSOR_KEY='price-sampler-index-v2'
-PRIORITY_SITES={'Hepsiburada','Trendyol'}
+CURSOR_KEY='price-sampler-index-v3'
+PRIORITY_SITES={'Hepsiburada','Trendyol','N11'}
 
 BAD_TITLE_PARTS=('ürün özeti','temel ürün bilgilerini','klavye kısayolu','shift + alt','amazon.com.tr','bu sayfada ara','tam görünümü görmek için','javascript:void','müşteri yorumları')
 
@@ -41,7 +41,7 @@ def baseline(title,current):
     vals=[]
     for r in rows:
         kind=(r.get('source_kind') or '').lower()
-        if 'telegram' in kind or 'deal' in kind:continue
+        if 'telegram' in kind or 'deal' in kind or 'campaign-effective' in kind:continue
         try:p=float(r.get('price'))
         except:continue
         if current*0.55<=p<=current*2.0:vals.append(p)
@@ -51,9 +51,7 @@ def baseline(title,current):
         q1=int(len(vals)*0.15);q2=max(q1+1,int(len(vals)*0.85));vals=vals[q1:q2]
     return float(statistics.median(vals)) if vals else None
 
-def _site(row):
-    return (row.get('site') or '').strip()
-
+def _site(row):return (row.get('site') or '').strip()
 def _rotate(rows,start,count):
     if not rows or count<=0:return []
     n=len(rows);return [rows[(start+i)%n] for i in range(min(count,n))]
@@ -63,9 +61,7 @@ def pick_products(products,start):
     regular=[r for r in products if _site(r) not in PRIORITY_SITES]
     pcount=min(len(priority),max(1,int(LIMIT*PRIORITY_SHARE))) if priority else 0
     rcount=min(len(regular),max(0,LIMIT-pcount))
-    if pcount+r_count if False else False: pass
-    picked=_rotate(priority,start,pcount)
-    picked+=_rotate(regular,start//2,rcount)
+    picked=_rotate(priority,start,pcount)+_rotate(regular,start//2,rcount)
     if len(picked)<min(LIMIT,len(products)):
         used={id(x) for x in picked}
         for r in _rotate(products,start,LIMIT):
@@ -82,9 +78,8 @@ def main():
     except:start=0
     picked,priority_total,regular_total=pick_products(products,start)
     next_idx=(start+max(1,len(picked)))%max(1,len(products))
-
-    ok=fail=normal=deal=changed=browser_used=bad_titles=priority_checked=0
-    print(f'=== SÜREKLİ FİYAT ÖRNEKLEME V4 | katalog={len(products)} | tur={len(picked)} | HB+TY_katalog={priority_total} | öncelik_payı=%{PRIORITY_SHARE*100:.0f} | browser_limit={BROWSER_LIMIT} | başlangıç={start} ===')
+    ok=fail=normal=deal=campaign_deal=changed=browser_used=bad_titles=priority_checked=0
+    print(f'=== SÜREKLİ FİYAT ÖRNEKLEME V5 | katalog={len(products)} | tur={len(picked)} | HB+TY+N11={priority_total} | öncelik_payı=%{PRIORITY_SHARE*100:.0f} | browser_limit={BROWSER_LIMIT} | başlangıç={start} ===')
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled']) if BROWSER_LIMIT else None
         page=browser.new_page() if browser else None
@@ -96,28 +91,36 @@ def main():
             except Exception:info=None
             if (not info or not info.get('live')) and page is not None and browser_used<BROWSER_LIMIT:
                 try:
-                    browser_used+=1
-                    info=v2.browser_check(page,url,expected) or info
+                    browser_used+=1;info=v2.browser_check(page,url,expected) or info
                 except Exception:pass
             if not info or not info.get('live'):
                 fail+=1;time.sleep(SLEEP);continue
-            p=float(info['live']);old=num(info.get('old'));final_title=choose_title(info.get('title'),title)
+            normal_p=float(info['live']);camp=info.get('campaign');effective=float(camp['effective']) if camp and camp.get('effective') else normal_p
+            old=num(info.get('old'));final_title=choose_title(info.get('title'),title)
             if not good_title(info.get('title')):bad_titles+=1
-            base=baseline(final_title,p)
-            kind='market-normal'
-            if base and base>p and (base-p)/base*100>=DEAL_PCT:
+            base=baseline(final_title,normal_p);kind='market-normal'
+            ref=base
+            if camp and effective<normal_p*.99:
+                ref=normal_p if not base or base>normal_p else base
+                disc=(ref-effective)/ref*100 if ref and ref>effective else 0
+                if disc>=DEAL_PCT:
+                    kind='market-campaign-deal';campaign_deal+=1;deal+=1
+                else:normal+=1
+            elif base and base>normal_p and (base-normal_p)/base*100>=DEAL_PCT:
                 kind='market-deal';deal+=1
             else:normal+=1
             prev=num(row.get('last_price'))
-            if prev and abs(prev-p)/max(p,1)>=0.005:changed+=1
-            ls.upsert_product(url,site,final_title,p,old,'price-sampler','',info.get('image') or '')
-            ls.add_price(url,site,p,old,'price-sampler','')
-            ar.add(final_title,p,site,old,'PriceSampler',kind,url,datetime.now(timezone.utc).isoformat())
+            if prev and abs(prev-normal_p)/max(normal_p,1)>=0.005:changed+=1
+            ls.upsert_product(url,site,final_title,normal_p,old,'price-sampler','',info.get('image') or '')
+            ls.add_price(url,site,normal_p,old,'price-sampler','')
+            ar.add(final_title,normal_p,site,old,'PriceSampler',kind if not camp else 'market-normal',url,datetime.now(timezone.utc).isoformat())
+            if camp and effective<normal_p*.99:
+                ar.add(final_title,effective,site,normal_p,'PriceSampler','campaign-effective',url,datetime.now(timezone.utc).isoformat())
             ok+=1
-            print(f'ÖRNEK: {site} | {p:.2f} TL | tip={kind} | baz={base or 0:.2f} | browser={browser_used} | {final_title[:72]}')
+            print(f'ÖRNEK: {site} | normal={normal_p:.2f} TL | efektif={effective:.2f} TL | tip={kind} | kampanya={camp.get("label") if camp else "yok"} | baz={base or 0:.2f} | {final_title[:68]}')
             time.sleep(SLEEP)
         if browser:browser.close()
     ar.cursor_set(CURSOR_KEY,next_idx)
-    print(f'=== ÖRNEKLEME BİTTİ | başarılı={ok} | fiyat_yok={fail} | normal={normal} | fırsat={deal} | değişen={changed} | HB+TY_kontrol={priority_checked} | browser={browser_used} | kirli_başlık_engel={bad_titles} | sonraki={next_idx} | arsiv={ar.stats()} ===')
+    print(f'=== ÖRNEKLEME BİTTİ | başarılı={ok} | fiyat_yok={fail} | normal={normal} | fırsat={deal} | kampanyalı_fırsat={campaign_deal} | değişen={changed} | öncelikli_kontrol={priority_checked} | browser={browser_used} | kirli_başlık_engel={bad_titles} | sonraki={next_idx} | arsiv={ar.stats()} ===')
 
 if __name__=='__main__':main()
