@@ -16,8 +16,7 @@ def clean_title(value):
     s=re.sub(r'\s+',' ',s).strip(' -|•:')
     return s[:200] if len(s)>=5 and s.lower() not in BAD else ''
 
-def generic_title(value):
-    return not bool(clean_title(value))
+def generic_title(value):return not bool(clean_title(value))
 
 def affiliate_url(url):
     if not isinstance(url,str) or 'amazon.com.tr' not in url.lower():return url
@@ -25,7 +24,9 @@ def affiliate_url(url):
     return urlunsplit((p.scheme,p.netloc,p.path,urlencode(q,doseq=True),p.fragment))
 
 def affiliate_ok(url):
-    return 'amazon.com.tr' not in (url or '').lower() or ('tag='+AMAZON_TAG) in affiliate_url(url)
+    if 'amazon.com.tr' not in (url or '').lower():return True
+    try:return any(k.lower()=='tag' and v==AMAZON_TAG for k,v in parse_qsl(urlsplit(url).query,keep_blank_values=True))
+    except:return False
 
 def product_identity(url):
     try:
@@ -45,21 +46,39 @@ def product_identity(url):
         return 'url:'+h+path.rstrip('/').lower()
     except:return 'url:'+str(url or '').lower()
 
+def _tokens(text):
+    stop={'ürün','ürünü','fırsat','indirim','adet','parça','set','marka','model','yeni','tl','sadece','stok','kampanya','sepette'}
+    return {x for x in re.findall(r'[a-zçğıöşü0-9]{3,}',(text or '').lower()) if x not in stop}
+
+def _score(a,b):
+    x,y=_tokens(a),_tokens(b);return len(x&y)/max(1,len(x)) if x and y else 0
+
 def _jsonld(soup):
     queue=[]
     for el in soup.select('script[type="application/ld+json"]'):
-        try:
-            data=json.loads(el.string or el.get_text() or '{}');queue.extend(data if isinstance(data,list) else [data])
+        try:data=json.loads(el.string or el.get_text() or '{}');queue.extend(data if isinstance(data,list) else [data])
         except:continue
     for obj in queue:
         if not isinstance(obj,dict):continue
         graph=obj.get('@graph')
         if isinstance(graph,list):queue.extend(x for x in graph if isinstance(x,dict))
-        title=clean_title(obj.get('name') or '')
-        image=obj.get('image'); image=image[0] if isinstance(image,list) and image else image
+        title=clean_title(obj.get('name') or '');image=obj.get('image');image=image[0] if isinstance(image,list) and image else image
         if isinstance(image,dict):image=image.get('url')
         if title or (isinstance(image,str) and image.startswith('http')):return title,image
     return '',None
+
+def _search_image(site,title):
+    base={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q=','N11':'https://www.n11.com/arama?q='}.get(site)
+    if not base or not title:return None
+    try:
+        r=requests.get(base+requests.utils.quote(title[:140]),headers=HEAD,timeout=6,allow_redirects=True)
+        if not r.ok:return None
+        soup=BeautifulSoup(r.text,'html.parser');best=(0,None)
+        for card in soup.select('div[data-asin],li,article,div[class*="product"],div[class*="p-card"]')[:100]:
+            score=_score(title,card.get_text(' ',strip=True));img=card.select_one('img[src],img[data-src]');src=(img.get('src') or img.get('data-src')) if img else None
+            if src and src.startswith('http') and score>best[0]:best=(score,src)
+        return best[1] if best[0]>=.50 else None
+    except:return None
 
 def resolve_meta(url,site='',hint='',timeout=7):
     urls=[url]
@@ -95,4 +114,5 @@ def resolve_meta(url,site='',hint='',timeout=7):
         if title:best_title=title
         if image:best_image=image
         if best_title and best_image:break
+    if best_title and not best_image:best_image=_search_image(site,best_title)
     return {'title':best_title,'image':best_image,'resolved_url':resolved}
