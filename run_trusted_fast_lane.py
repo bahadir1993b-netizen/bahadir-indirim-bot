@@ -1,5 +1,6 @@
 import os,re,html,json,time,requests
 from datetime import datetime,timezone,timedelta
+from urllib.parse import urljoin,urlparse
 from bs4 import BeautifulSoup
 import telegram_sources as ts
 import local_store as ls
@@ -13,7 +14,10 @@ HEAD=dict(ts.HEAD);HEAD.update({'Cache-Control':'no-cache, no-store, max-age=0',
 def fmt(x):return f'{x:,.2f}'.replace(',','X').replace('.',',').replace('X','.')
 def fast_key(source,post_id):return f'fast:{source}:{post_id}'
 def clean_title(raw):
-    s=re.sub(r'@[A-Za-z0-9_]+|#(?:tanıtım|tanitim|reklam)',' ',raw or '',flags=re.I)
+    s=raw or ''
+    # Kaynak kanal başlıklarını ve kendi imzalarını ürün adına taşımıyoruz.
+    s=re.sub(r'(?i)^\s*(?:ÖZEL\s+FIRSATLAR\s*-\s*Güncel\s+İndirimler|Amazon\s+İndirimleri\s*-\s*Özel\s+Fırsatlar|Fırsat\s+Merkezi)\s*',' ',s)
+    s=re.sub(r'@[A-Za-z0-9_]+|#(?:tanıtım|tanitim|reklam)',' ',s,flags=re.I)
     s=re.sub(r'(?i)\b(?:sohbet grubumuz|kanalımıza katıl|takip et|reklam)\b.*$',' ',s)
     s=re.sub(r'[🔥✅🔻🔗👉👇📣🎯🎁]+',' ',s);s=re.sub(r'\s+',' ',s).strip(' -|•:')
     for pat in [r'\s\d[\d.,]*\s*(?:TL|₺)\b',r'\s(?:fırsata git|firsata git)\b']:
@@ -34,29 +38,83 @@ def local_meta(url):
     except:pass
     return 'Fırsat Ürünü',''
 
+def _direct_from_response(resp,site):
+    try:
+        final=ts.clean(resp.url)
+        if ts.site(final)==site and ts.valid(site,final):return ts.normalize(site,final)
+        soup=BeautifulSoup(resp.text or '','html.parser')
+        # Canonical / og:url / açık ürün linkleri
+        for sel,attr in [('link[rel="canonical"]','href'),('meta[property="og:url"]','content')]:
+            el=soup.select_one(sel)
+            if el:
+                u=urljoin(final,el.get(attr) or '')
+                if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
+        for a in soup.select('a[href]'):
+            u=urljoin(final,a.get('href') or '')
+            if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
+        # Bazı kısa link servisleri meta refresh döndürüyor.
+        meta=soup.select_one('meta[http-equiv]')
+        if meta and (meta.get('http-equiv') or '').lower()=='refresh':
+            m=re.search(r'url\s*=\s*([^;]+)$',meta.get('content') or '',re.I)
+            if m:
+                u=urljoin(final,m.group(1).strip(' \"\''))
+                if ts.site(u)==site and ts.valid(site,u):return ts.normalize(site,u)
+    except Exception:pass
+    return None
+
+def _resolve_short(site,x):
+    # Önce ortak resolver.
+    try:
+        u=ts.http_resolve(x,site)
+        if u:return u
+    except Exception:pass
+    # app.hb.biz gibi linkler bazen farklı davranıyor; GET/HEAD ve HTML hedeflerini ayrıca dene.
+    for method in ('get','head'):
+        try:
+            fn=getattr(requests,method)
+            r=fn(x,headers=HEAD,timeout=5,allow_redirects=True)
+            u=_direct_from_response(r,site)
+            if u:return u
+        except Exception:pass
+    return None
+
+def _search_store(site,title):
+    try:
+        u=ts.search_marketplace_http(site,title)
+        if u:return u
+    except Exception:pass
+    # Hepsiburada araması için relative href fallback'i.
+    if site=='Hepsiburada' and title and title!='Fırsat Ürünü':
+        try:
+            q=requests.utils.quote(title[:140]);base='https://www.hepsiburada.com/ara?q='+q
+            r=requests.get(base,headers=HEAD,timeout=6,allow_redirects=True)
+            if r.ok:
+                soup=BeautifulSoup(r.text,'html.parser');best=[]
+                toks={z for z in re.findall(r'[a-zçğıöşü0-9]{3,}',title.lower())}
+                for a in soup.select('a[href]'):
+                    u=urljoin(r.url,a.get('href') or '')
+                    if not ts.valid('Hepsiburada',u):continue
+                    txt=(a.get_text(' ',strip=True) or '').lower();score=sum(1 for z in toks if z in txt)
+                    best.append((score,u))
+                if best:
+                    _,u=max(best,key=lambda z:z[0]);return ts.normalize('Hepsiburada',u)
+        except Exception:pass
+    return None
+
 def resolve_product_url(site,links,title):
-    # Önce doğrudan ürün linki.
     for x in links:
         try:
             if ts.site(x)==site and ts.valid(site,x):
                 u=ts.normalize(site,x)
                 if u:return u
         except Exception:pass
-    # Telegram kanallarında app.hb.biz / hps.im / amzn.to / ty.gl gibi kısa
-    # linkler sık kullanılıyor. Bunları hızlı HTTP redirect ile gerçek ürüne çöz.
     for x in links:
         try:
             if ts.site(x)==site:
-                u=ts.http_resolve(x,site)
+                u=_resolve_short(site,x)
                 if u:return u
         except Exception:pass
-    # Son çare: ürün başlığıyla mağaza içi HTTP araması. Browser açmadan hızlı kalır.
-    if title and title!='Fırsat Ürünü':
-        try:
-            u=ts.search_marketplace_http(site,title)
-            if u:return u
-        except Exception:pass
-    return None
+    return _search_store(site,title)
 
 def send(site,url,title,current,ref,campaign,image,row):
     disc=(ref-current)/ref*100 if ref and ref>current else None
@@ -83,7 +141,7 @@ def process(source,b):
     site=next((ts.site(x) for x in links if ts.site(x)),None)
     u=resolve_product_url(site,links,title) if site else None
     if not site or not cur or not u:
-        print(f'FAST ATLANDI | {source}:{post_id} | eksik_temel | site={site} fiyat={cur} link={bool(u)}');return False
+        print(f'FAST ATLANDI | {source}:{post_id} | eksik_temel | site={site} fiyat={cur} link={bool(u)} | başlık={title[:70]}');return False
     pg=inspect_page(u,cur) or {}
     if pg.get('available') is False:ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | stok_yok');return False
     local_title,local_image=local_meta(u);page_title=clean_title(pg.get('title') or '')
