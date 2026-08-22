@@ -24,28 +24,38 @@ def _uniq(vals):
 
 def campaign_from_text(text,base_price=None):
     t=re.sub(r'\s+',' ',text or '')
-    campaigns=[];effective=None;qty=None
-    for m in re.finditer(r'\b(\d+)\s*al\s*(\d+)\s*(?:öde|ode)\b',t,re.I):
+    campaigns=[]
+    for m in re.finditer(r'\b(\d+)\s*(?:adet\s*)?al\s*(\d+)\s*(?:adet\s*)?(?:öde|ode)\b',t,re.I):
         buy,paid=int(m.group(1)),int(m.group(2))
         if buy>paid>0:
             eff=base_price*paid/buy if base_price else None
             campaigns.append({'label':f'{buy} al {paid} öde','qty':buy,'effective':eff,'priority':100})
-    m=re.search(r'(\d+)\s*adet\s*(?:satın alın|satin alin).*?(\d+)\s*adette?\s*geçerli\s*%\s*(\d{1,2})\s*indirim',t,re.I)
+
+    # Examples: "2 adet satın alın, 1 adette %50 indirim" / "2. üründe %50 indirim".
+    patterns=[
+        r'(\d+)\s*adet\s*(?:satın\s*al(?:ın|in)?|alin).*?(\d+)\s*(?:\.\s*)?adette?\s*(?:geçerli\s*)?%\s*(\d{1,2})\s*indirim',
+        r'(\d+)\s*(?:\.\s*)?(?:üründe|urunde|ürüne|urune)\s*%\s*(\d{1,2})\s*indirim',
+        r'(\d+)\s*(?:\.\s*)?(?:ürün|urun)\s*%\s*(\d{1,2})\s*(?:indirimli|indirim)'
+    ]
+    m=re.search(patterns[0],t,re.I)
     if m and base_price:
         buy,disc_qty,pct=map(int,m.groups())
         if buy>0 and 0<disc_qty<=buy and 0<pct<100:
-            total=base_price*(buy-disc_qty)+base_price*disc_qty*(1-pct/100)
-            eff=total/buy
-            campaigns.append({'label':f'{buy} adet alımda {disc_qty} üründe %{pct} indirim','qty':buy,'effective':eff,'priority':90})
+            eff=base_price*((buy-disc_qty)+disc_qty*(1-pct/100))/buy
+            campaigns.append({'label':f'{buy} adet alımda {disc_qty} üründe %{pct} indirim','qty':buy,'effective':eff,'priority':95})
+    for pat in patterns[1:]:
+        for m in re.finditer(pat,t,re.I):
+            nth,pct=map(int,m.groups())
+            if base_price and nth>=2 and 0<pct<100:
+                eff=base_price*((nth-1)+(1-pct/100))/nth
+                campaigns.append({'label':f'{nth}. üründe %{pct} indirim','qty':nth,'effective':eff,'priority':94})
+
     for m in re.finditer(r'(\d[\d.,]*)\s*(?:TL|₺).*?(\d[\d.,]*)\s*(?:TL|₺)\s*(?:tasarruf|indirim)',t,re.I):
         threshold,saving=price(m.group(1)),price(m.group(2))
         if threshold and saving and threshold>saving:
             campaigns.append({'label':f'{threshold:.0f} TL seçili ürün alışverişine {saving:.0f} TL indirim','qty':None,'effective':None,'priority':20})
-    if campaigns:
-        best=sorted(campaigns,key=lambda x:((x.get('effective') is not None),x.get('priority',0),-(x.get('effective') or 10**9)),reverse=True)[0]
-        effective=best.get('effective');qty=best.get('qty')
-    else:best=None
-    return {'best':best,'all':campaigns,'effective':effective,'qty':qty}
+    best=sorted(campaigns,key=lambda x:((x.get('effective') is not None),x.get('priority',0),-(x.get('effective') or 10**9)),reverse=True)[0] if campaigns else None
+    return {'best':best,'all':campaigns,'effective':best.get('effective') if best else None,'qty':best.get('qty') if best else None}
 
 def inspect_page(url,expected=None):
     out={'ok':False,'available':None,'live':None,'old':None,'title':'','image':'','campaign':None,'campaigns':[],'text':''}
@@ -99,33 +109,15 @@ def inspect_page(url,expected=None):
     except Exception:return out
 
 def choose_reference(current,history=None,source=None,page=None,market_median=None,market_floor=None):
-    """Conservative reference selection.
-
-    Priority is the product's own history/page/list signal. Cross-store market data is
-    allowed only as a conservative floor benchmark when the candidate is materially
-    cheaper than the cheapest stable exact-product offer. We never use a high market
-    median as an invented old price.
-    """
     history=[float(x) for x in (history or []) if x and current*1.03<float(x)<=current*1.8]
     hist=float(statistics.median(history)) if history else None
     local=[x for x in (hist,source,page) if x and current*1.03<x<=current*1.8]
     local_ref=float(statistics.median(local)) if local else None
-
-    # Same exact product materially cheaper elsewhere => not a deal.
     if market_floor and current>market_floor*1.05:return None,'market-blocked'
-
     if local_ref:
-        if market_median and market_median>current*1.03:
-            ref=min(local_ref,market_median)
-            return ref,'market+history'
+        if market_median and market_median>current*1.03:return min(local_ref,market_median),'market+history'
         if local_ref>current*1.45:return None,'unverified-high-reference'
         return local_ref,'history/page'
-
-    # No usable historical/list reference: permit only a real cross-store price lead.
-    # Using the cheapest stable market offer (not the median) means the displayed
-    # reference remains conservative. A >=15% deal threshold later in the pipeline
-    # still has to be satisfied, so borderline price noise is not posted.
     if market_floor and market_median and market_floor>current*1.10 and market_median<=market_floor*1.45:
         return float(market_floor),'market-floor'
-
     return None,'no-historical-reference'
