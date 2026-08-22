@@ -12,6 +12,7 @@ MAX_PRODUCTS=max(20,int(os.environ.get('DIRECT_MAX_PRODUCTS','120')))
 BROWSER_LIMIT=max(5,int(os.environ.get('DIRECT_BROWSER_LIMIT','24')))
 FRESH_HOURS=max(1,int(os.environ.get('DIRECT_FRESH_SOURCE_HOURS','4')))
 AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or '').strip()
+DIRECT_ALERTS_ENABLED=str(os.environ.get('DIRECT_ALERTS_ENABLED','0')).strip().lower() in {'1','true','yes','on'}
 STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'errors':0,'history_writes':0,'archive_ref':0}
 
 def num(x):return v2.num(x)
@@ -52,19 +53,23 @@ def outlink(url,site):
     return u
 
 def send(row,current,ref,title,image,site,refsrc):
+    if not DIRECT_ALERTS_ENABLED:
+        print(f'YAYIN KAPALI (direct) | {site} | {current:.2f}->{ref:.2f} | {title[:70]}')
+        return False
     disc=(ref-current)/ref*100;url=outlink(row['product_url'],site)
     lines=[f'⭐️⭐️⭐️ 🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}',f'💰 {fmt(current)} TL',f'🏷️ Referans fiyat: {fmt(ref)} TL',f'🛍️ {site}','','👇 <a href="'+html.escape(url,quote=True)+'"><b>Fırsata git</b></a>']
     kb={'inline_keyboard':[[{'text':'🛒 FIRSATA GİT','url':url}]]};text='\n'.join(lines);resp=None
     if image:
         try:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHANNEL_ID,'photo':image,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(kb,ensure_ascii=False)},timeout=18)
         except:resp=None
-    if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','reply_markup':kb},timeout=18)
+    if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'link_preview_options':{'is_disabled':True},'reply_markup':kb},timeout=18)
     if not resp.ok:raise RuntimeError(f'Telegram {resp.status_code}: {resp.text[:160]}')
     STATS['sent']+=1;print(f'GÖNDERİLDİ: {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | ref={refsrc} | {title[:70]}')
+    return True
 
 def main():
     rows=merge_catalog();STATS['catalog']=len(rows)
-    print(f'=== API-SİZ fiyat takip V4 | VPS+Telegram+OnuAl+Akakce hafıza | katalog={len(rows)} | browser_limit={BROWSER_LIMIT} ===')
+    print(f'=== API-SİZ fiyat takip V4 | VPS+Telegram+OnuAl+Akakce hafıza | katalog={len(rows)} | browser_limit={BROWSER_LIMIT} | yayin={"ACIK" if DIRECT_ALERTS_ENABLED else "KAPALI"} ===')
     browser_used=0
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled']);page=browser.new_page()
