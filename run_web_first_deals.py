@@ -9,16 +9,17 @@ import local_store as ls
 import archive_store as ar
 
 MIN_DISC=max(8.0,float(os.environ.get('WEB_FIRST_MIN_DISCOUNT','15')))
-MAX_CHECK=max(40,int(os.environ.get('WEB_FIRST_MAX_CHECK','220')))
-BROWSER_LIMIT=max(0,int(os.environ.get('WEB_FIRST_BROWSER_LIMIT','45')))
+MAX_CHECK=max(60,int(os.environ.get('WEB_FIRST_MAX_CHECK','260')))
+BROWSER_LIMIT=max(0,int(os.environ.get('WEB_FIRST_BROWSER_LIMIT','55')))
 AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 HEAD=dict(ts.HEAD)
 LANDINGS=[
- ('Amazon','https://www.amazon.com.tr/deals'),('Amazon','https://www.amazon.com.tr/gp/goldbox'),('Amazon','https://www.amazon.com.tr/s?k=indirim'),
+ ('Amazon','https://www.amazon.com.tr/deals'),('Amazon','https://www.amazon.com.tr/gp/goldbox'),('Amazon','https://www.amazon.com.tr/s?k=indirim'),('Amazon','https://www.amazon.com.tr/s?k=firsat'),
  ('Hepsiburada','https://www.hepsiburada.com/kampanyalar'),('Hepsiburada','https://www.hepsiburada.com/ara?q=indirim'),('Hepsiburada','https://www.hepsiburada.com/ara?q=firsat'),
  ('Trendyol','https://www.trendyol.com/sr?fl=encokavantajliurunler'),('Trendyol','https://www.trendyol.com/sr?q=indirim'),('Trendyol','https://www.trendyol.com/sr?q=firsat'),
- ('N11','https://www.n11.com/kampanyalar'),('N11','https://www.n11.com/arama?q=indirim'),
+ ('N11','https://www.n11.com/kampanyalar'),('N11','https://www.n11.com/arama?q=indirim'),('N11','https://www.n11.com/arama?q=firsat'),
 ]
+DISCOVERY_TERMS=['şampuan','kişisel bakım','deterjan','temizlik','bebek bezi','ıslak mendil','kahve','gıda','mutfak','küçük ev aletleri','kulaklık','akıllı saat','tablet','televizyon','telefon aksesuar','oyuncak','kırtasiye','ev yaşam','spor ayakkabı','pet ürünleri']
 BAD_TITLES={'ürün','fırsat ürünü','sepete ekleniyor','sepete ekle','hemen al','amazon'}
 
 def canonical(u):return ls.canonical(u)
@@ -80,7 +81,6 @@ def sale_meta(url,site,hint=''):
         if title!='Fırsat Ürünü':best_title=title
         if image:best_image=image
         if best_title!='Fırsat Ürünü' and best_image:break
-    # Son çare: ürün adı biliniyorsa mağaza aramasından uygun ürün görselini al.
     if not best_image and best_title!='Fırsat Ürünü':
         base={'Amazon':'https://www.amazon.com.tr/s?k=','Hepsiburada':'https://www.hepsiburada.com/ara?q=','Trendyol':'https://www.trendyol.com/sr?q='}.get(site)
         if base:
@@ -89,10 +89,9 @@ def sale_meta(url,site,hint=''):
                 soup=BeautifulSoup(r.text,'html.parser');want=ts.tokens(best_title);best=(0,None)
                 for card in soup.select('div[data-asin],li,div[class*="product"],div[class*="p-card"]')[:80]:
                     txt=card.get_text(' ',strip=True);got=ts.tokens(txt);score=len(want&got)/max(1,len(want))
-                    img=card.select_one('img[src]')
-                    src=img.get('src') if img else None
+                    img=card.select_one('img[src]');src=img.get('src') if img else None
                     if src and src.startswith('http') and score>best[0]:best=(score,src)
-                if best[0]>=.25:best_image=best[1]
+                if best[0]>=.50:best_image=best[1]
             except:pass
     return best_title,best_image
 
@@ -105,16 +104,29 @@ def product_links(body,base,expected_site=None):
             if n and n not in out:out.append(n)
     return out
 
+def _dynamic_targets():
+    idx=int(datetime.now(timezone.utc).timestamp()//120)%len(DISCOVERY_TERMS);targets=list(LANDINGS)
+    terms=[DISCOVERY_TERMS[(idx+i)%len(DISCOVERY_TERMS)] for i in range(3)]
+    for term in terms:
+        q=requests.utils.quote(term+' indirim')
+        targets.extend([
+            ('Amazon','https://www.amazon.com.tr/s?k='+q),
+            ('Hepsiburada','https://www.hepsiburada.com/ara?q='+q),
+            ('Trendyol','https://www.trendyol.com/sr?q='+q),
+            ('N11','https://www.n11.com/arama?q='+q),
+        ])
+    print('WEB KEŞİF KONULARI | '+', '.join(terms));return targets
+
 def discover(page):
     out=[];per_site={}
-    for site,url in LANDINGS:
+    for site,url in _dynamic_targets():
         links=[]
         try:
             r=requests.get(url,headers=HEAD,timeout=10,allow_redirects=True)
             if r.ok:links=product_links(r.text,r.url,site)
         except Exception:pass
         if len(links)<5:
-            try:page.goto(url,wait_until='domcontentloaded',timeout=14000);page.wait_for_timeout(900);links=product_links(page.content(),page.url,site)
+            try:page.goto(url,wait_until='domcontentloaded',timeout=14000);page.wait_for_timeout(800);links=product_links(page.content(),page.url,site)
             except Exception:pass
         per_site[site]=per_site.get(site,0)+len(links)
         for u in links[:80]:
@@ -138,10 +150,8 @@ def duplicate_db(row,current):
     except:return False
 
 def send(row,url,site,title,current,ref,image,campaign=None):
-    # Yayından hemen önce gerçek satış sayfasından başlık/görseli bir kez daha kurtar.
     title,image2=sale_meta(url,site,title);image=image or image2
-    if title=='Fırsat Ürünü':
-        print(f'WEB-FIRST YAYIN ENGELLENDİ | ürün_adı_yok | {site} | {url}');return False
+    if title=='Fırsat Ürünü':print(f'WEB-FIRST YAYIN ENGELLENDİ | ürün_adı_yok | {site} | {url}');return False
     out_url=affiliate_url(ts.normalize(site,url) or url,site);disc=(ref-current)/ref*100
     if site=='Amazon' and ('tag='+AMAZON_TAG) not in out_url:raise RuntimeError('Amazon affiliate tag missing at publish boundary')
     lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}']
@@ -171,7 +181,7 @@ def main():
     try:
         with sync_playwright() as pw:
             browser=pw.chromium.launch(headless=True,args=['--disable-blink-features=AutomationControlled']);page=browser.new_page();discovered=discover(page)
-            catalog=[r.get('url') for r in ls.list_products(1600) if r.get('url')];urls=[]
+            catalog=[r.get('url') for r in ls.list_products(2000) if r.get('url')];urls=[]
             for u in discovered+catalog:
                 c=canonical(u)
                 if c and c not in urls:urls.append(c)
