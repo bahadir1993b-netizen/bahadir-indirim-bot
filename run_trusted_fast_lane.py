@@ -3,6 +3,7 @@ from datetime import datetime,timezone,timedelta
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import telegram_sources as ts
+import local_store as ls
 from deal_validation import inspect_page
 
 TRUSTED={'OzelFirsatlar','AmazonOzel','FirsatMerkezi'}
@@ -16,17 +17,12 @@ def clean_title(raw):
     s=re.sub(r'@[A-Za-z0-9_]+|#(?:tanıtım|tanitim|reklam)',' ',raw or '',flags=re.I)
     s=re.sub(r'(?i)\b(?:sohbet grubumuz|kanalımıza katıl|takip et|reklam)\b.*$',' ',s)
     s=re.sub(r'[🔥✅🔻🔗👉👇📣🎯🎁]+',' ',s)
-    s=re.sub(r'\s+',' ',s).strip(' -|•')
+    s=re.sub(r'\s*[:|\-]?\s*Amazon\.com\.tr\s*:\s*.*$',' ',s,flags=re.I)
+    s=re.sub(r'\s+',' ',s).strip(' -|•:')
     for pat in [r'\s\d[\d.,]*\s*(?:TL|₺)\b',r'\s(?:fırsata git|firsata git)\b']:
         m=re.search(pat,s,re.I)
         if m:s=s[:m.start()]
     return s[:170] if len(s)>=5 else 'Fırsat Ürünü'
-
-def source_photo(block):
-    for el in block.select('.tgme_widget_message_photo_wrap,.tgme_widget_message_photo'):
-        m=re.search(r"background-image\s*:\s*url\(['\"]?([^'\")]+)",html.unescape(el.get('style') or ''),re.I)
-        if m:return m.group(1)
-    return None
 
 def qty_hint(text):
     for pat in [r'\b(\d+)\s*adet\s*alımda',r'\b(\d+)\s*adet\s*alimda',r'\b(\d+)\s*adet\b']:
@@ -71,6 +67,7 @@ def send(site,url,title,current,ref,campaign,image,row):
     if not rr or not rr.ok:
         rr=requests.post('https://api.telegram.org/bot'+ts.TOKEN+'/sendMessage',json={'chat_id':ts.CHAT,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'link_preview_options':{'is_disabled':True},'reply_markup':kb},timeout=18)
     rr.raise_for_status()
+    ls.mark_published(url,current,'trusted-fast-lane')
     if isinstance(row,dict) and row.get('id'):
         ts.sb('PATCH',f'products?id=eq.{row["id"]}',json={'last_posted_at':datetime.now(timezone.utc).isoformat(),'last_posted_price':current})
     try:ts.sb('POST','price_history',json={'price':current,'product_url':url,'site':site,'recorded_at':datetime.now(timezone.utc).isoformat()})
@@ -111,9 +108,6 @@ def process(source,b,page):
     refs=[x for x in [live,pg.get('old'),old] if x and float(x)>effective*1.03 and float(x)<=effective*2.2]
     ref=min(map(float,refs)) if refs else None
     if not ref and live and effective<live*.95:ref=float(live)
-    # Öncelikli, güvenilir kaynaklardaki ödeme-adımı/sepette fırsatlarını sırf
-    # referans fiyat çekilemedi diye kaçırma. Bu durumda yüzde iddiası yapmadan
-    # temiz 'FIRSAT' formatında yayınla.
     trusted_payment_rescue = source in TRUSTED and payment_hint(raw)
     if not ref and not trusted_payment_rescue:
         print(f'FAST ATLANDI | {source}:{post_id} | referans_yok | kaynak={cur:.2f} canlı={live or 0:.2f}');return False
@@ -121,10 +115,15 @@ def process(source,b,page):
         disc=(ref-effective)/ref*100
         if disc<MIN_DISC:
             ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | %{disc:.1f}');return False
+    # Tüm servisler aynı yerel publish_log'u kullanır. Amazon URL'si local_store
+    # tarafından ASIN'e indirgenir; /ref, query ve farklı kaynak URL'leri aynı üründür.
+    if ls.recently_published(u,effective,days=30,min_drop=.05):
+        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | duplicate-global-30d');return False
     row=ts.save(site,u,title,effective,ref)
     if recently_posted(row,effective):
-        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | duplicate-30d');return False
-    photo=source_photo(b) or pg.get('image')
+        ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | duplicate-db-30d');return False
+    # Fotoğrafı kaynak Telegram mesajından kopyalama. Doğrudan satış sayfasından al.
+    photo=pg.get('image') or None
     ok=send(site,u,title,effective,ref,label,photo,row)
     ts.remember(key)
     return ok
