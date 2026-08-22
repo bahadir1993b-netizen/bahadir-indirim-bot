@@ -35,6 +35,39 @@ services:
     command: >-
       sh -c 'while true; do python run_telegram_realtime.py; code=$$?; echo "Telegram turu bitti (kod=$$code). ${TELEGRAM_INTERVAL:-60} sn sonra tekrar."; sleep ${TELEGRAM_INTERVAL:-60}; done'
 
+  trusted-fast-lane:
+    build: .
+    container_name: bahadir-trusted-fast-lane
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FAST_LANE_INTERVAL: ${FAST_LANE_INTERVAL:-30}
+      FAST_LANE_MAX_AGE: ${FAST_LANE_MAX_AGE:-12}
+      FAST_LANE_MIN_DISCOUNT: ${FAST_LANE_MIN_DISCOUNT:-5}
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_trusted_fast_lane.py; code=$$?; echo "Öncelikli Telegram hızlı tur bitti (kod=$$code). ${FAST_LANE_INTERVAL:-30} sn sonra tekrar."; sleep ${FAST_LANE_INTERVAL:-30}; done'
+
+  web-first-deals:
+    build: .
+    container_name: bahadir-web-first-deals
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WEB_FIRST_INTERVAL: ${WEB_FIRST_INTERVAL:-120}
+      WEB_FIRST_MIN_DISCOUNT: ${WEB_FIRST_MIN_DISCOUNT:-15}
+      WEB_FIRST_MAX_CHECK: ${WEB_FIRST_MAX_CHECK:-180}
+      WEB_FIRST_BROWSER_LIMIT: ${WEB_FIRST_BROWSER_LIMIT:-35}
+      LOCAL_PRICE_DB: /app/data/price_memory.db
+    volumes:
+      - ./data:/app/data
+    command: >-
+      sh -c 'while true; do python run_web_first_deals.py; code=$$?; echo "Web-first fırsat turu bitti (kod=$$code). ${WEB_FIRST_INTERVAL:-120} sn sonra tekrar."; sleep ${WEB_FIRST_INTERVAL:-120}; done'
+
   price-sampler:
     build: .
     container_name: bahadir-price-sampler
