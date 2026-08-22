@@ -1,4 +1,4 @@
-import os, sqlite3, threading, re
+import os, sqlite3, threading, re, json
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, urlunparse
 
@@ -69,6 +69,17 @@ def conn():
       source TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_publish_time ON publish_log(published_at DESC);
+    CREATE TABLE IF NOT EXISTS runtime_state(
+      service TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      candidates INTEGER DEFAULT 0,
+      checked INTEGER DEFAULT 0,
+      sent INTEGER DEFAULT 0,
+      errors INTEGER DEFAULT 0,
+      details TEXT
+    );
     ''')
     return c
 
@@ -82,7 +93,6 @@ def recently_published(url,price,days=30,min_drop=0.05):
         dt=datetime.fromisoformat(str(r['published_at']).replace('Z','+00:00'))
         if datetime.now(timezone.utc)-dt>timedelta(days=int(days)):return False
         old=float(r['price'])
-        # Aynı/yüksek fiyatı tekrar yayınlama; ancak en az %5 daha ucuzsa yeniden yayınla.
         return float(price)>=old*(1-float(min_drop))
     except:return False
 
@@ -93,6 +103,32 @@ def mark_published(url,price,source=''):
         c=conn();c.execute('''INSERT INTO publish_log(url,price,published_at,source) VALUES(?,?,?,?)
           ON CONFLICT(url) DO UPDATE SET price=excluded.price,published_at=excluded.published_at,source=excluded.source''',
           (url,float(price),_now(),str(source or '')));c.commit();c.close()
+
+def runtime_start(service,details=None):
+    now=_now()
+    with _lock:
+        c=conn();c.execute('''INSERT INTO runtime_state(service,status,started_at,finished_at,candidates,checked,sent,errors,details)
+          VALUES(?,?,?,?,0,0,0,0,?) ON CONFLICT(service) DO UPDATE SET status='running',started_at=excluded.started_at,details=excluded.details''',
+          (str(service),'running',now,None,json.dumps(details or {},ensure_ascii=False)));c.commit();c.close()
+
+def runtime_finish(service,status='ok',candidates=0,checked=0,sent=0,errors=0,details=None):
+    with _lock:
+        c=conn();c.execute('''INSERT INTO runtime_state(service,status,started_at,finished_at,candidates,checked,sent,errors,details)
+          VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(service) DO UPDATE SET status=excluded.status,finished_at=excluded.finished_at,
+          candidates=excluded.candidates,checked=excluded.checked,sent=excluded.sent,errors=excluded.errors,details=excluded.details''',
+          (str(service),str(status),_now(),_now(),int(candidates or 0),int(checked or 0),int(sent or 0),int(errors or 0),json.dumps(details or {},ensure_ascii=False)));c.commit();c.close()
+
+def runtime_snapshot():
+    with _lock:
+        c=conn();rows=c.execute('SELECT * FROM runtime_state ORDER BY service').fetchall();
+        last_pub=c.execute('SELECT url,price,published_at,source FROM publish_log ORDER BY published_at DESC LIMIT 1').fetchone();c.close()
+    out=[]
+    for r in rows:
+        d=dict(r)
+        try:d['details']=json.loads(d.get('details') or '{}')
+        except:d['details']={}
+        out.append(d)
+    return {'services':out,'last_publish':dict(last_pub) if last_pub else None}
 
 def upsert_product(url,site='',title='',price=None,old_price=None,source='',post_id='',image=''):
     url=canonical(url)
