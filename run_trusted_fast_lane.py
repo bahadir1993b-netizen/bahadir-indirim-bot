@@ -30,8 +30,7 @@ def local_meta(url):
     cu=ls.canonical(url)
     try:
         for r in ls.list_products(2500):
-            if ls.canonical(r.get('url') or '')==cu:
-                return clean_title(r.get('title') or ''),r.get('image') or ''
+            if ls.canonical(r.get('url') or '')==cu:return clean_title(r.get('title') or ''),r.get('image') or ''
     except:pass
     return 'Fırsat Ürünü',''
 
@@ -58,17 +57,15 @@ def process(source,b):
     if not tx:return False
     raw=tx.get_text(' ',strip=True);links=[ts.clean(a.get('href') or '') for a in b.select('a[href]')];title=clean_title(raw);cur,old=ts.source_pair(raw)
     site=next((ts.site(x) for x in links if ts.site(x)),None);u=next((ts.normalize(site,x) for x in links if site and ts.valid(site,x)),None)
-    if not site or not cur or not u:return False
+    if not site or not cur or not u:
+        print(f'FAST ATLANDI | {source}:{post_id} | eksik_temel | site={site} fiyat={cur} link={bool(u)}');return False
     pg=inspect_page(u,cur) or {}
     if pg.get('available') is False:ts.remember(key);print(f'FAST ATLANDI | {source}:{post_id} | stok_yok');return False
-    local_title,local_image=local_meta(u)
-    page_title=clean_title(pg.get('title') or '')
+    local_title,local_image=local_meta(u);page_title=clean_title(pg.get('title') or '')
     if page_title!='Fırsat Ürünü':title=page_title
     elif title=='Fırsat Ürünü' and local_title!='Fırsat Ürünü':title=local_title
     image=pg.get('image') or local_image
-    # Link zaten doğrulandıysa kötü başlıkla yayınlama. Bir tur daha bekleyip metadata birikmesine izin ver.
-    if title=='Fırsat Ürünü':
-        print(f'FAST BEKLET | {source}:{post_id} | ürün_adı_alınamadı');return False
+    if title=='Fırsat Ürünü':print(f'FAST BEKLET | {source}:{post_id} | ürün_adı_alınamadı | foto={"var" if image else "yok"}');return False
     live=pg.get('live');campaign=pg.get('campaign');effective=float(cur);label=None
     if campaign and campaign.get('effective'):effective=float(campaign['effective']);label=campaign.get('label')
     q=qty_hint(raw)
@@ -76,11 +73,12 @@ def process(source,b):
     if payment_hint(raw) and not label:label='Ödeme adımında geçerli'
     refs=[float(x) for x in [live,pg.get('old'),old] if x and float(x)>effective*1.03 and float(x)<=effective*1.8];ref=min(refs) if refs else None
     rescue=source in TRUSTED and (payment_hint(raw) or strong_hint(raw) or (old and old>effective*1.05))
-    if not ref and not rescue:print(f'FAST ATLANDI | {source}:{post_id} | referans_yok');return False
-    if ref and (ref-effective)/ref*100<MIN_DISC:ts.remember(key);return False
-    if ls.recently_published(u,effective,days=30,min_drop=.05):ts.remember(key);return False
-    row=ts.save(site,u,title,effective,ref)
-    ok=send(site,u,title,effective,ref,label,image,row);ts.remember(key);return ok
+    if not ref and not rescue:print(f'FAST ATLANDI | {source}:{post_id} | referans_yok | fiyat={effective:.2f} canlı={live or 0:.2f}');return False
+    if ref and (ref-effective)/ref*100<MIN_DISC:
+        disc=(ref-effective)/ref*100;print(f'FAST ATLANDI | {source}:{post_id} | indirim_yetersiz | fiyat={effective:.2f} ref={ref:.2f} indirim=%{disc:.1f} min=%{MIN_DISC}');ts.remember(key);return False
+    if ls.recently_published(u,effective,days=30,min_drop=.05):
+        print(f'FAST ATLANDI | {source}:{post_id} | tekrar_30gun_fiyat_dusmedi | fiyat={effective:.2f}');ts.remember(key);return False
+    row=ts.save(site,u,title,effective,ref);ok=send(site,u,title,effective,ref,label,image,row);ts.remember(key);return ok
 
 def main():
     ls.runtime_start('trusted-fast-lane');now=datetime.now(timezone.utc);jobs=[];sent=errors=0
@@ -88,8 +86,8 @@ def main():
         channel=ts.SOURCES.get(source)
         if not channel:continue
         try:r=requests.get(f'https://t.me/s/{channel}?v={time.time_ns()}',headers=HEAD,timeout=4)
-        except Exception:errors+=1;continue
-        if not r.ok:continue
+        except Exception as e:errors+=1;print(f'FAST KAYNAK HATA | {source} | {type(e).__name__}: {e}');continue
+        if not r.ok:print(f'FAST KAYNAK HATA | {source} | HTTP {r.status_code}');continue
         blocks=[]
         for b in BeautifulSoup(r.text,'html.parser').select('.tgme_widget_message')[-12:]:
             tm=b.select_one('time[datetime]')
