@@ -1,24 +1,21 @@
 import os,re,json,html,requests
 from datetime import datetime,timezone,timedelta
-from urllib.parse import urlencode,urlsplit,urlunsplit,parse_qsl
 from playwright.sync_api import sync_playwright
 import local_store as ls
 import archive_store as ar
 import run_direct_watch_v2 as v2
+import publish_core as pc
 
 TOKEN=os.environ['TELEGRAM_BOT_TOKEN'];CHANNEL_ID=os.environ.get('TELEGRAM_CHANNEL_ID','-1004424116637')
 MIN_DISCOUNT=float(os.environ.get('MIN_DISCOUNT','15'));MAX_PRODUCTS=max(20,int(os.environ.get('DIRECT_MAX_PRODUCTS','120')));BROWSER_LIMIT=max(5,int(os.environ.get('DIRECT_BROWSER_LIMIT','24')));FRESH_HOURS=max(1,int(os.environ.get('DIRECT_FRESH_SOURCE_HOURS','4')))
-AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or os.environ.get('AMAZON_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 DIRECT_ALERTS_ENABLED=str(os.environ.get('DIRECT_ALERTS_ENABLED','0')).strip().lower() in {'1','true','yes','on'}
-STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'duplicates':0,'errors':0,'history_writes':0,'archive_ref':0,'campaign_deals':0}
+STATS={'catalog':0,'checked':0,'http_live':0,'browser':0,'local_fresh':0,'no_price':0,'no_ref':0,'below':0,'oos':0,'sent':0,'duplicates':0,'errors':0,'history_writes':0,'archive_ref':0,'campaign_deals':0,'title_blocked':0,'photo_rescued':0}
 
 def num(x):return v2.num(x)
 def fmt(x):return v2.fmt(x)
 def canonical(u):return ls.canonical(u)
 def site_of(u,s=''):return v2.site_of(u,s)
-def clean_title(t):
-    t=re.sub(r'\s*[:|\-]?\s*Amazon\.com\.tr\s*:\s*.*$',' ',t or '',flags=re.I);t=re.sub(r'(?i)^\s*(?:sepete ekleniyor|sepete ekle|hemen al)\s*[.!…-]*\s*',' ',t)
-    return re.sub(r'\s+',' ',t).strip(' -|:')[:220] or 'Ürün'
+def clean_title(t):return pc.clean_title(t)
 def parse_dt(s):
     try:return datetime.fromisoformat(str(s).replace('Z','+00:00'))
     except:return None
@@ -35,7 +32,7 @@ def merge_catalog():
     merged={}
     for r in ls.list_products(MAX_PRODUCTS*4):
         u=canonical(r.get('url') or '');s=site_of(u,r.get('site') or '')
-        if s in {'Amazon','Hepsiburada','Trendyol','N11'} and u.startswith('http'):merged[u]={'id':None,'product_url':u,'site':s,'product_name':r.get('title') or 'Ürün','current_price':r.get('last_price'),'previous_price':r.get('last_old_price'),'last_posted_at':None,'local_last_seen':r.get('last_seen')}
+        if s in {'Amazon','Hepsiburada','Trendyol','N11'} and u.startswith('http'):merged[u]={'id':None,'product_url':u,'site':s,'product_name':r.get('title') or '','current_price':r.get('last_price'),'previous_price':r.get('last_old_price'),'last_posted_at':None,'local_last_seen':r.get('last_seen')}
     try:
         for r in v2.load_catalog():
             u=canonical(r.get('product_url') or '');s=site_of(u,r.get('site') or '')
@@ -45,17 +42,17 @@ def merge_catalog():
     except Exception as e:print(f'SUPABASE KATALOG UYARI: {type(e).__name__}: {e}')
     rows=list(merged.values());rows.sort(key=lambda x:x.get('updated_at') or x.get('local_last_seen') or '');return rows[:MAX_PRODUCTS]
 
-def outlink(url,site):
-    u=canonical(url)
-    if site!='Amazon':return u
-    try:
-        p=urlsplit(u);q=dict(parse_qsl(p.query,keep_blank_values=True));q['tag']=AMAZON_TAG;return urlunsplit((p.scheme,p.netloc,p.path,urlencode(q),p.fragment))
-    except Exception:return u+('&' if '?' in u else '?')+urlencode({'tag':AMAZON_TAG})
+def outlink(url,site):return pc.affiliate_url(canonical(url)) if site=='Amazon' else canonical(url)
 
 def send(row,current,ref,title,image,site,refsrc,campaign=None):
-    if not DIRECT_ALERTS_ENABLED:print(f'YAYIN KAPALI (direct) | {site} | {current:.2f}->{ref:.2f} | {title[:70]}');return False
-    url=outlink(row['product_url'],site)
-    if ls.recently_published(url,current,days=30,min_drop=.05):STATS['duplicates']+=1;print(f'TEKRAR ENGELLENDİ: {site} | {current:.2f} | {title[:70]}');return False
+    if not DIRECT_ALERTS_ENABLED:print(f'YAYIN KAPALI (direct) | {site} | {current:.2f}->{ref:.2f} | {(title or "")[:70]}');return False
+    raw_url=row['product_url'];meta=pc.resolve_meta(raw_url,site,title);title=pc.clean_title(meta.get('title') or title);new_image=meta.get('image')
+    if not title:
+        STATS['title_blocked']+=1;print(f'YAYIN ENGELLENDİ | direct | ürün_adı_yok | {site} | {raw_url}');return False
+    if not image and new_image:STATS['photo_rescued']+=1
+    image=image or new_image;url=outlink(meta.get('resolved_url') or raw_url,site)
+    if site=='Amazon' and not pc.affiliate_ok(url):raise RuntimeError('Amazon affiliate tag missing at publish boundary')
+    if ls.recently_published(raw_url,current,days=30,min_drop=.05):STATS['duplicates']+=1;print(f'TEKRAR ENGELLENDİ: {site} | {current:.2f} | {title[:70]}');return False
     disc=(ref-current)/ref*100;lines=[f'🔥 %{disc:.0f} İNDİRİM','',f'🛍️ {html.escape(title)}',f'💰 Efektif birim fiyat: {fmt(current)} TL' if campaign else f'💰 {fmt(current)} TL']
     if campaign:
         lines.append(f'🎯 Kampanya: {html.escape(campaign.get("label") or "Kampanyalı alım")}')
@@ -65,10 +62,10 @@ def send(row,current,ref,title,image,site,refsrc,campaign=None):
         try:
             img=requests.get(image,headers=v2.HEAD,timeout=12,allow_redirects=True)
             if img.ok and len(img.content)>4000:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendPhoto',data={'chat_id':CHANNEL_ID,'caption':text[:1024],'parse_mode':'HTML','reply_markup':json.dumps(kb,ensure_ascii=False)},files={'photo':('product.jpg',img.content,img.headers.get('content-type','image/jpeg'))},timeout=22)
-        except:resp=None
+        except Exception as e:print(f'DIRECT FOTO UYARI | {type(e).__name__}')
     if not resp or not resp.ok:resp=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHANNEL_ID,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'link_preview_options':{'is_disabled':True},'reply_markup':kb},timeout=18)
     if not resp.ok:raise RuntimeError(f'Telegram {resp.status_code}: {resp.text[:160]}')
-    ls.mark_published(url,current,'direct');STATS['sent']+=1;print(f'GÖNDERİLDİ: {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | ref={refsrc} | {title[:70]}');return True
+    ls.mark_published(raw_url,current,'direct');STATS['sent']+=1;print(f'GÖNDERİLDİ: {site} | {current:.2f}->{ref:.2f} | %{disc:.1f} | ref={refsrc} | foto={"var" if image else "yok"} | {title[:70]}');return True
 
 def main():
     ls.runtime_start('direct');rows=merge_catalog();STATS['catalog']=len(rows);print(f'=== API-SİZ fiyat takip V5 | katalog={len(rows)} | browser_limit={BROWSER_LIMIT} | yayin={"ACIK" if DIRECT_ALERTS_ENABLED else "KAPALI"} ===')
@@ -81,21 +78,22 @@ def main():
                     STATS['checked']+=1;url=canonical(row.get('product_url'));site=site_of(url,row.get('site') or '');expected=num(row.get('current_price'));info=v2.http_check(url,expected)
                     if info and info.get('oos'):STATS['oos']+=1;continue
                     if info and info.get('live'):STATS['http_live']+=1
-                    if (not info or not info.get('live') or not info.get('image')) and browser_used<BROWSER_LIMIT:
+                    if (not info or not info.get('live') or not info.get('image') or not pc.clean_title(info.get('title'))) and browser_used<BROWSER_LIMIT:
                         browser_used+=1;STATS['browser']+=1;bi=v2.browser_check(page,url,expected);info=bi or info
                     if not info or not info.get('live'):
                         info=fresh_local_price(url)
                         if info:STATS['local_fresh']+=1
                     if not info or not info.get('live'):STATS['no_price']+=1;print(f'FİYAT YOK: {site} | {row.get("product_name","")[:80]}');continue
-                    normal=float(info['live']);campaign=info.get('campaign');current=float(campaign['effective']) if campaign and campaign.get('effective') else normal;title=clean_title(info.get('title') or row.get('product_name') or 'Ürün');hist=local_hist(url);ref,refsrc=ar.smart_reference(title,current,hist,info.get('old'),num(row.get('previous_price')))
+                    normal=float(info['live']);campaign=info.get('campaign');current=float(campaign['effective']) if campaign and campaign.get('effective') else normal;title=clean_title(info.get('title') or row.get('product_name') or '');hist=local_hist(url);ref,refsrc=ar.smart_reference(title,current,hist,info.get('old'),num(row.get('previous_price')))
                     if campaign and normal>current*1.03:
                         if not ref or ref>normal:ref=normal
                         refsrc='page-campaign';STATS['campaign_deals']+=1
                     if refsrc.startswith('weighted') or refsrc=='deal-history-not-low':STATS['archive_ref']+=1
-                    ls.upsert_product(url,site=site,title=title,price=normal,old_price=info.get('old') or num(row.get('previous_price')),source=info.get('source') or 'direct',post_id='',image=info.get('image') or '');ls.add_price(url,site,normal,info.get('old'),'direct-check','');ar.add(title,normal,site,info.get('old'),'DirectCheck','direct-current',url);STATS['history_writes']+=1
-                    if campaign and current<normal*.99:ar.add(title,current,site,normal,'DirectCheck','campaign-effective',url)
-                    if not ref:STATS['no_ref']+=1;print(f'REFERANS YOK: {site} | {current:.2f} | neden={refsrc} | {title[:65]}');continue
-                    disc=(ref-current)/ref*100;print(f'KONTROL: {site} | {current:.2f} -> ref {ref:.2f} | %{disc:.1f} | ref={refsrc} | {title[:60]}')
+                    if title:ls.upsert_product(url,site=site,title=title,price=normal,old_price=info.get('old') or num(row.get('previous_price')),source=info.get('source') or 'direct',post_id='',image=info.get('image') or '')
+                    ls.add_price(url,site,normal,info.get('old'),'direct-check','');ar.add(title or row.get('product_name') or '',normal,site,info.get('old'),'DirectCheck','direct-current',url);STATS['history_writes']+=1
+                    if campaign and current<normal*.99:ar.add(title or row.get('product_name') or '',current,site,normal,'DirectCheck','campaign-effective',url)
+                    if not ref:STATS['no_ref']+=1;print(f'REFERANS YOK: {site} | {current:.2f} | neden={refsrc} | {(title or "")[:65]}');continue
+                    disc=(ref-current)/ref*100;print(f'KONTROL: {site} | {current:.2f} -> ref {ref:.2f} | %{disc:.1f} | ref={refsrc} | {(title or "")[:60]}')
                     if disc<MIN_DISCOUNT:STATS['below']+=1;continue
                     send(row,current,ref,title,info.get('image'),site,refsrc,campaign)
                 except Exception as e:STATS['errors']+=1;print(f'ÜRÜN HATA: {type(e).__name__}: {e}')
