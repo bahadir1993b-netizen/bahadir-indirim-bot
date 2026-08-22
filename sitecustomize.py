@@ -1,10 +1,11 @@
-"""Runtime marketplace extensions shared by every Python service."""
+"""Runtime marketplace and safety extensions shared by every Python service."""
 try:
     import os,re,requests
+    from datetime import datetime,timezone,timedelta
     from urllib.parse import urlparse
     import telegram_sources as ts
+    import local_store as ls
 
-    # Amazon gelir ortaklığı etiketi hiçbir çalışma yolunda boş kalmasın.
     ts.AMAZON_TAG=(os.environ.get('AMAZON_ASSOCIATE_TAG') or 'ozelfirsat09-21').strip() or 'ozelfirsat09-21'
 
     _base_normalize=ts.normalize
@@ -17,14 +18,30 @@ try:
         return _base_normalize(site,url)
     ts.normalize=normalize_ext
 
-    ts.MARKET['n11.com']='N11'
-    ts.SHORT.update({'n11.com':'N11','www.n11.com':'N11'})
+    # Direct/web/fast yayın kapıları yerel publish_log kullanıyor. Eski Telegram
+    # yolu yalnız Supabase'e yazmışsa da aynı ürünü tekrar basmamak için fallback.
+    _local_recent=ls.recently_published
+    def recent_ext(url,price,days=30,min_drop=.05):
+        if _local_recent(url,price,days,min_drop):return True
+        key=ls.canonical(url)
+        if not key or not price:return False
+        try:
+            since=(datetime.now(timezone.utc)-timedelta(days=int(days))).isoformat()
+            rows=ts.sb('GET','price_history',params={'select':'price,product_url,recorded_at','recorded_at':f'gte.{since}','order':'recorded_at.desc','limit':'500'})
+            for r in rows:
+                ru=r.get('product_url') or ''
+                if ru.startswith('telegram://') or ls.canonical(ru)!=key:continue
+                old=float(r.get('price') or 0)
+                if old and float(price)>=old*(1-float(min_drop)):return True
+        except Exception:pass
+        return False
+    ls.recently_published=recent_ext
 
+    ts.MARKET['n11.com']='N11';ts.SHORT.update({'n11.com':'N11','www.n11.com':'N11'})
     _old_valid=ts.valid
     def valid_ext(site,url):
         if site!='N11':return _old_valid(site,url)
-        p=urlparse(url or '');host=p.netloc.lower().replace('www.','')
-        return host.endswith('n11.com') and bool(re.search(r'/urun/[^/?#]+',p.path,re.I))
+        p=urlparse(url or '');host=p.netloc.lower().replace('www.','');return host.endswith('n11.com') and bool(re.search(r'/urun/[^/?#]+',p.path,re.I))
     ts.valid=valid_ext
 
     _old_http=ts.search_marketplace_http
